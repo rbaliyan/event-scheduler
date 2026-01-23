@@ -190,6 +190,11 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("insert: %w", err)
 	}
 
+	// Record metrics
+	if s.opts.Metrics != nil {
+		s.opts.Metrics.RecordScheduled(ctx, msg.EventName)
+	}
+
 	s.logger.Debug("scheduled message",
 		"id", msg.ID,
 		"event", msg.EventName,
@@ -223,6 +228,16 @@ func (s *MongoScheduler) ScheduleAfter(ctx context.Context, eventName string, pa
 
 // Cancel cancels a scheduled message
 func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
+	// First, get the message to record the event name for metrics
+	var eventName string
+	if s.opts.Metrics != nil {
+		var mongoMsg MongoMessage
+		err := s.collection.FindOne(ctx, bson.M{"_id": id}).Decode(&mongoMsg)
+		if err == nil {
+			eventName = mongoMsg.EventName
+		}
+	}
+
 	filter := bson.M{"_id": id}
 
 	result, err := s.collection.DeleteOne(ctx, filter)
@@ -232,6 +247,11 @@ func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
 
 	if result.DeletedCount == 0 {
 		return fmt.Errorf("message not found: %s", id)
+	}
+
+	// Record metrics
+	if s.opts.Metrics != nil {
+		s.opts.Metrics.RecordCancelled(ctx, eventName)
 	}
 
 	s.logger.Debug("cancelled scheduled message", "id", id)
@@ -355,6 +375,8 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 	now := time.Now()
 
 	for i := 0; i < s.opts.BatchSize; i++ {
+		processingStart := time.Now()
+
 		msg, err := s.claimDue(ctx, now)
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
@@ -370,6 +392,12 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 				"id", msg.ID,
 				"event", msg.EventName,
 				"error", err)
+
+			// Record failure metrics
+			if s.opts.Metrics != nil {
+				s.opts.Metrics.RecordFailed(ctx, msg.EventName, "publish_error")
+			}
+
 			// Message stays in processing, will be recovered by recoverStuck
 			continue
 		}
@@ -379,6 +407,11 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 			s.logger.Error("failed to delete published message",
 				"id", msg.ID,
 				"error", err)
+		}
+
+		// Record delivery metrics
+		if s.opts.Metrics != nil {
+			s.opts.Metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
 
 		s.logger.Debug("delivered scheduled message",
@@ -447,6 +480,11 @@ func (s *MongoScheduler) recoverStuck(ctx context.Context) {
 	}
 
 	if result.ModifiedCount > 0 {
+		// Record recovery metrics
+		if s.opts.Metrics != nil {
+			s.opts.Metrics.RecordRecovered(ctx, result.ModifiedCount)
+		}
+
 		s.logger.Warn("recovered stuck scheduled messages",
 			"count", result.ModifiedCount,
 			"stuck_duration", s.stuckDuration)
@@ -507,6 +545,68 @@ func (s *MongoScheduler) DeleteOlderThan(ctx context.Context, age time.Duration)
 	}
 
 	return result.DeletedCount, nil
+}
+
+// CountPending returns the number of pending scheduled messages.
+// This is useful for monitoring and metrics.
+func (s *MongoScheduler) CountPending(ctx context.Context) (int64, error) {
+	filter := bson.M{
+		"$or": []bson.M{
+			{"status": SchedulerStatusPending},
+			{"status": bson.M{"$exists": false}}, // Backward compat: no status = pending
+		},
+	}
+	return s.collection.CountDocuments(ctx, filter)
+}
+
+// CountProcessing returns the number of messages currently being processed.
+// This is useful for monitoring and metrics.
+func (s *MongoScheduler) CountProcessing(ctx context.Context) (int64, error) {
+	filter := bson.M{"status": SchedulerStatusProcessing}
+	return s.collection.CountDocuments(ctx, filter)
+}
+
+// CountStuck returns the number of messages stuck in processing (older than stuckDuration).
+// This is useful for monitoring and metrics.
+func (s *MongoScheduler) CountStuck(ctx context.Context) (int64, error) {
+	cutoff := time.Now().Add(-s.stuckDuration)
+	filter := bson.M{
+		"status":     SchedulerStatusProcessing,
+		"claimed_at": bson.M{"$lt": cutoff},
+	}
+	return s.collection.CountDocuments(ctx, filter)
+}
+
+// SetupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
+// This should be called after creating the scheduler if metrics are enabled.
+//
+// Example:
+//
+//	metrics, _ := scheduler.NewMetrics()
+//	s := scheduler.NewMongoScheduler(db, transport, scheduler.WithMetrics(metrics))
+//	s.SetupMetricsCallbacks(ctx)
+func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
+	if s.opts.Metrics == nil {
+		return
+	}
+
+	s.opts.Metrics.SetPendingCallback(func() int64 {
+		count, err := s.CountPending(ctx)
+		if err != nil {
+			s.logger.Error("failed to count pending messages for metrics", "error", err)
+			return 0
+		}
+		return count
+	})
+
+	s.opts.Metrics.SetStuckCallback(func() int64 {
+		count, err := s.CountStuck(ctx)
+		if err != nil {
+			s.logger.Error("failed to count stuck messages for metrics", "error", err)
+			return 0
+		}
+		return count
+	})
 }
 
 // Compile-time check

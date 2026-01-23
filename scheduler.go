@@ -97,6 +97,10 @@ type Message struct {
 
 	// CreatedAt is when the message was scheduled.
 	CreatedAt time.Time
+
+	// RetryCount tracks the number of delivery attempts.
+	// This is used internally for backoff calculations.
+	RetryCount int `json:"retry_count,omitempty"`
 }
 
 // Scheduler schedules messages for future delivery.
@@ -168,6 +172,18 @@ type Filter struct {
 	Limit int
 }
 
+// BackoffStrategy defines a backoff strategy for retry logic.
+//
+// Implementations must be safe for concurrent use.
+type BackoffStrategy interface {
+	// NextDelay returns the delay for the given attempt (0-indexed).
+	// Attempt 0 is the first retry, not the initial attempt.
+	NextDelay(attempt int) time.Duration
+
+	// Reset resets the strategy state if any.
+	Reset()
+}
+
 // Options configures the scheduler behavior.
 //
 // Use the With* functions to configure options:
@@ -189,6 +205,22 @@ type Options struct {
 	// KeyPrefix is the prefix for storage keys.
 	// Default: "scheduler:"
 	KeyPrefix string
+
+	// Metrics is the optional metrics instance for recording scheduler metrics.
+	// When nil, no metrics are recorded.
+	Metrics *Metrics
+
+	// Backoff is the optional backoff strategy for retry delivery.
+	// When a message fails to deliver, this determines how long to wait
+	// before the next retry attempt.
+	// When nil, failed messages are retried immediately on the next poll.
+	Backoff BackoffStrategy
+
+	// MaxRetries is the maximum number of delivery attempts before giving up.
+	// If 0 (default), messages are retried indefinitely.
+	// After MaxRetries attempts, the message is removed from the scheduler
+	// and the failure is logged.
+	MaxRetries int
 }
 
 // DefaultOptions returns default scheduler options.
@@ -255,6 +287,81 @@ func WithKeyPrefix(prefix string) Option {
 	return func(o *Options) {
 		if prefix != "" {
 			o.KeyPrefix = prefix
+		}
+	}
+}
+
+// WithMetrics enables OpenTelemetry metrics for the scheduler.
+//
+// When metrics are enabled, the scheduler will record:
+//   - scheduled_messages_total: Counter of total messages scheduled
+//   - scheduled_messages_delivered_total: Counter of messages successfully delivered
+//   - scheduled_messages_failed_total: Counter of messages that failed delivery
+//   - scheduled_messages_pending: Gauge of current pending scheduled messages
+//   - scheduled_messages_stuck: Gauge of current stuck messages being recovered
+//   - schedule_delivery_delay_seconds: Histogram of delay between scheduled and actual delivery
+//   - schedule_processing_duration_seconds: Histogram of time to process and deliver a message
+//
+// Example:
+//
+//	metrics, _ := scheduler.NewMetrics()
+//	scheduler := scheduler.NewRedisScheduler(client, transport,
+//	    scheduler.WithMetrics(metrics),
+//	)
+func WithMetrics(m *Metrics) Option {
+	return func(o *Options) {
+		if m != nil {
+			o.Metrics = m
+		}
+	}
+}
+
+// WithBackoff sets a backoff strategy for retry delivery.
+//
+// When a message fails to deliver, this strategy determines how long to wait
+// before the next retry attempt. The message's ScheduledAt is updated to
+// now + backoff delay, so it will be picked up in a future poll.
+//
+// If not set, failed messages are immediately returned to the pending queue
+// and may be retried on the next poll.
+//
+// Example:
+//
+//	// Using the event library's backoff package
+//	import "github.com/rbaliyan/event/v3/backoff"
+//
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithBackoff(&backoff.Exponential{
+//	        Initial:    time.Second,
+//	        Multiplier: 2.0,
+//	        Max:        5 * time.Minute,
+//	        Jitter:     0.1,
+//	    }),
+//	)
+func WithBackoff(strategy BackoffStrategy) Option {
+	return func(o *Options) {
+		o.Backoff = strategy
+	}
+}
+
+// WithMaxRetries sets the maximum number of delivery attempts.
+//
+// After this many failed attempts, the message is removed from the scheduler
+// and the failure is logged. Use this to prevent messages from being retried
+// indefinitely.
+//
+// If set to 0 (default), messages are retried indefinitely until successful.
+//
+// Example:
+//
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithBackoff(backoffStrategy),
+//	    WithMaxRetries(5),
+//	)
+func WithMaxRetries(max int) Option {
+	return func(o *Options) {
+		if max >= 0 {
+			o.MaxRetries = max
 		}
 	}
 }

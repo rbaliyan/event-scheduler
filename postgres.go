@@ -102,6 +102,11 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("insert: %w", err)
 	}
 
+	// Record metrics
+	if s.opts.Metrics != nil {
+		s.opts.Metrics.RecordScheduled(ctx, msg.EventName)
+	}
+
 	s.logger.Debug("scheduled message",
 		"id", msg.ID,
 		"event", msg.EventName,
@@ -135,6 +140,13 @@ func (s *PostgresScheduler) ScheduleAfter(ctx context.Context, eventName string,
 
 // Cancel cancels a scheduled message
 func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
+	// First, get the event name for metrics if enabled
+	var eventName string
+	if s.opts.Metrics != nil {
+		query := fmt.Sprintf("SELECT event_name FROM %s WHERE id = $1", s.table)
+		_ = s.db.QueryRowContext(ctx, query, id).Scan(&eventName)
+	}
+
 	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.table)
 
 	result, err := s.db.ExecContext(ctx, query, id)
@@ -145,6 +157,11 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return fmt.Errorf("message not found: %s", id)
+	}
+
+	// Record metrics
+	if s.opts.Metrics != nil {
+		s.opts.Metrics.RecordCancelled(ctx, eventName)
 	}
 
 	s.logger.Debug("cancelled scheduled message", "id", id)
@@ -322,6 +339,8 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 	var toDelete []string
 
 	for rows.Next() {
+		processingStart := time.Now()
+
 		var msg Message
 		var metadata []byte
 
@@ -351,10 +370,21 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 				"id", msg.ID,
 				"event", msg.EventName,
 				"error", err)
+
+			// Record failure metrics
+			if s.opts.Metrics != nil {
+				s.opts.Metrics.RecordFailed(ctx, msg.EventName, "publish_error")
+			}
+
 			continue
 		}
 
 		toDelete = append(toDelete, msg.ID)
+
+		// Record delivery metrics
+		if s.opts.Metrics != nil {
+			s.opts.Metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
+		}
 
 		s.logger.Debug("delivered scheduled message",
 			"id", msg.ID,
@@ -396,6 +426,47 @@ func (s *PostgresScheduler) publishMessage(ctx context.Context, msg *Message) er
 	)
 
 	return s.transport.Publish(ctx, msg.EventName, transportMsg)
+}
+
+// CountPending returns the number of pending scheduled messages.
+// This is useful for monitoring and metrics.
+func (s *PostgresScheduler) CountPending(ctx context.Context) (int64, error) {
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table)
+	var count int64
+	err := s.db.QueryRowContext(ctx, query).Scan(&count)
+	return count, err
+}
+
+// SetupMetricsCallbacks configures the metrics gauge callbacks for pending messages.
+// This should be called after creating the scheduler if metrics are enabled.
+//
+// Note: PostgreSQL scheduler doesn't have a separate processing state like Redis/MongoDB,
+// so the stuck messages gauge will always be 0.
+//
+// Example:
+//
+//	metrics, _ := scheduler.NewMetrics()
+//	s := scheduler.NewPostgresScheduler(db, transport, scheduler.WithMetrics(metrics))
+//	s.SetupMetricsCallbacks(ctx)
+func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
+	if s.opts.Metrics == nil {
+		return
+	}
+
+	s.opts.Metrics.SetPendingCallback(func() int64 {
+		count, err := s.CountPending(ctx)
+		if err != nil {
+			s.logger.Error("failed to count pending messages for metrics", "error", err)
+			return 0
+		}
+		return count
+	})
+
+	// PostgreSQL uses FOR UPDATE SKIP LOCKED, so there's no separate "stuck" state
+	// Messages are either pending or being processed in a transaction
+	s.opts.Metrics.SetStuckCallback(func() int64 {
+		return 0
+	})
 }
 
 // Compile-time check

@@ -130,6 +130,11 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("zadd: %w", err)
 	}
 
+	// Record metrics
+	if s.opts.Metrics != nil {
+		s.opts.Metrics.RecordScheduled(ctx, msg.EventName)
+	}
+
 	s.logger.Debug("scheduled message",
 		"id", msg.ID,
 		"event", msg.EventName,
@@ -188,6 +193,11 @@ func (s *RedisScheduler) Cancel(ctx context.Context, id string) error {
 		if msg.ID == id {
 			if err := s.client.ZRem(ctx, s.key(), result).Err(); err != nil {
 				return fmt.Errorf("zrem: %w", err)
+			}
+
+			// Record metrics
+			if s.opts.Metrics != nil {
+				s.opts.Metrics.RecordCancelled(ctx, msg.EventName)
 			}
 
 			s.logger.Debug("cancelled scheduled message", "id", id)
@@ -333,6 +343,8 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 	now := time.Now().Unix()
 
 	for i := 0; i < s.opts.BatchSize; i++ {
+		processingStart := time.Now()
+
 		// Atomically move message from pending to processing
 		msg, member, err := s.claimDueMessage(ctx, now)
 		if err != nil {
@@ -348,18 +360,63 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
-				"error", err)
-			// Move back to pending for retry
+				"error", err,
+				"retry_count", msg.RetryCount)
+
+			// Record failure metrics
+			if s.opts.Metrics != nil {
+				s.opts.Metrics.RecordFailed(ctx, msg.EventName, "publish_error")
+			}
+
+			// Remove from processing set
 			s.client.ZRem(ctx, s.processingKey(), member)
+
+			// Check if max retries exceeded
+			if s.opts.MaxRetries > 0 && msg.RetryCount >= s.opts.MaxRetries {
+				s.logger.Error("scheduled message exceeded max retries, discarding",
+					"id", msg.ID,
+					"event", msg.EventName,
+					"retry_count", msg.RetryCount,
+					"max_retries", s.opts.MaxRetries)
+				continue
+			}
+
+			// Increment retry count and calculate next retry time
+			msg.RetryCount++
+			nextRetryAt := time.Now()
+			if s.opts.Backoff != nil {
+				backoffDelay := s.opts.Backoff.NextDelay(msg.RetryCount - 1)
+				nextRetryAt = nextRetryAt.Add(backoffDelay)
+				s.logger.Debug("scheduling retry with backoff",
+					"id", msg.ID,
+					"retry_count", msg.RetryCount,
+					"backoff_delay", backoffDelay,
+					"next_retry_at", nextRetryAt)
+			}
+			msg.ScheduledAt = nextRetryAt
+
+			// Re-serialize with updated retry count and scheduled time
+			updatedMember, marshalErr := json.Marshal(msg)
+			if marshalErr != nil {
+				s.logger.Error("failed to marshal message for retry", "error", marshalErr)
+				continue
+			}
+
+			// Add back to pending with updated scheduled time
 			s.client.ZAdd(ctx, s.key(), redis.Z{
 				Score:  float64(msg.ScheduledAt.Unix()),
-				Member: member,
+				Member: updatedMember,
 			})
 			continue
 		}
 
 		// Remove from processing set after successful publish
 		s.client.ZRem(ctx, s.processingKey(), member)
+
+		// Record delivery metrics
+		if s.opts.Metrics != nil {
+			s.opts.Metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
+		}
 
 		s.logger.Debug("delivered scheduled message",
 			"id", msg.ID,
@@ -454,6 +511,11 @@ func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 	}
 
 	if recovered > 0 {
+		// Record recovery metrics
+		if s.opts.Metrics != nil {
+			s.opts.Metrics.RecordRecovered(ctx, recovered)
+		}
+
 		s.logger.Warn("recovered stuck scheduled messages",
 			"count", recovered,
 			"stuck_duration", s.stuckDuration)
@@ -492,6 +554,57 @@ func (s *RedisScheduler) key() string {
 // processingKey returns the Redis key for messages currently being processed.
 func (s *RedisScheduler) processingKey() string {
 	return s.opts.KeyPrefix + "processing"
+}
+
+// CountPending returns the number of pending scheduled messages.
+// This is useful for monitoring and metrics.
+func (s *RedisScheduler) CountPending(ctx context.Context) (int64, error) {
+	return s.client.ZCard(ctx, s.key()).Result()
+}
+
+// CountProcessing returns the number of messages currently being processed.
+// This is useful for monitoring and metrics.
+func (s *RedisScheduler) CountProcessing(ctx context.Context) (int64, error) {
+	return s.client.ZCard(ctx, s.processingKey()).Result()
+}
+
+// CountStuck returns the number of messages stuck in processing (older than stuckDuration).
+// This is useful for monitoring and metrics.
+func (s *RedisScheduler) CountStuck(ctx context.Context) (int64, error) {
+	cutoff := time.Now().Add(-s.stuckDuration).Unix()
+	return s.client.ZCount(ctx, s.processingKey(), "-inf", fmt.Sprintf("%d", cutoff)).Result()
+}
+
+// SetupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
+// This should be called after creating the scheduler if metrics are enabled.
+//
+// Example:
+//
+//	metrics, _ := scheduler.NewMetrics()
+//	s := scheduler.NewRedisScheduler(client, transport, scheduler.WithMetrics(metrics))
+//	s.SetupMetricsCallbacks(ctx)
+func (s *RedisScheduler) SetupMetricsCallbacks(ctx context.Context) {
+	if s.opts.Metrics == nil {
+		return
+	}
+
+	s.opts.Metrics.SetPendingCallback(func() int64 {
+		count, err := s.CountPending(ctx)
+		if err != nil {
+			s.logger.Error("failed to count pending messages for metrics", "error", err)
+			return 0
+		}
+		return count
+	})
+
+	s.opts.Metrics.SetStuckCallback(func() int64 {
+		count, err := s.CountStuck(ctx)
+		if err != nil {
+			s.logger.Error("failed to count stuck messages for metrics", "error", err)
+			return 0
+		}
+		return count
+	})
 }
 
 // Compile-time check
