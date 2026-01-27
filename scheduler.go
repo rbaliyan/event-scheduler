@@ -173,6 +173,9 @@ type Filter struct {
 }
 
 // BackoffStrategy defines a backoff strategy for retry logic.
+// This interface matches backoff.Strategy from the main event library
+// (github.com/rbaliyan/event/v3/backoff) for loose coupling. Implementations
+// from that package can be used directly without importing this package.
 //
 // Implementations must be safe for concurrent use.
 type BackoffStrategy interface {
@@ -184,7 +187,7 @@ type BackoffStrategy interface {
 	Reset()
 }
 
-// Options configures the scheduler behavior.
+// options configures the scheduler behavior.
 //
 // Use the With* functions to configure options:
 //
@@ -192,53 +195,53 @@ type BackoffStrategy interface {
 //	    WithPollInterval(100*time.Millisecond),
 //	    WithBatchSize(50),
 //	)
-type Options struct {
-	// PollInterval is how often to check for due messages.
+type options struct {
+	// pollInterval is how often to check for due messages.
 	// Lower values reduce delivery latency but increase load.
 	// Default: 100ms
-	PollInterval time.Duration
+	pollInterval time.Duration
 
-	// BatchSize is the maximum number of messages to process per poll.
+	// batchSize is the maximum number of messages to process per poll.
 	// Default: 100
-	BatchSize int
+	batchSize int
 
-	// KeyPrefix is the prefix for storage keys.
+	// keyPrefix is the prefix for storage keys.
 	// Default: "scheduler:"
-	KeyPrefix string
+	keyPrefix string
 
-	// Metrics is the optional metrics instance for recording scheduler metrics.
+	// metrics is the optional metrics instance for recording scheduler metrics.
 	// When nil, no metrics are recorded.
-	Metrics *Metrics
+	metrics *Metrics
 
-	// Backoff is the optional backoff strategy for retry delivery.
+	// backoff is the optional backoff strategy for retry delivery.
 	// When a message fails to deliver, this determines how long to wait
 	// before the next retry attempt.
 	// When nil, failed messages are retried immediately on the next poll.
-	Backoff BackoffStrategy
+	backoff BackoffStrategy
 
-	// MaxRetries is the maximum number of delivery attempts before giving up.
+	// maxRetries is the maximum number of delivery attempts before giving up.
 	// If 0 (default), messages are retried indefinitely.
 	// After MaxRetries attempts, the message is removed from the scheduler
 	// and the failure is logged.
-	MaxRetries int
+	maxRetries int
 }
 
-// DefaultOptions returns default scheduler options.
+// defaultOptions returns default scheduler options.
 //
 // Defaults:
-//   - PollInterval: 100ms
-//   - BatchSize: 100
-//   - KeyPrefix: "scheduler:"
-func DefaultOptions() *Options {
-	return &Options{
-		PollInterval: 100 * time.Millisecond,
-		BatchSize:    100,
-		KeyPrefix:    "scheduler:",
+//   - pollInterval: 100ms
+//   - batchSize: 100
+//   - keyPrefix: "scheduler:"
+func defaultOptions() *options {
+	return &options{
+		pollInterval: 100 * time.Millisecond,
+		batchSize:    100,
+		keyPrefix:    "scheduler:",
 	}
 }
 
-// Option is a function that modifies Options.
-type Option func(*Options)
+// Option is a function that modifies scheduler options.
+type Option func(*options)
 
 // WithPollInterval sets how often to check for due messages.
 //
@@ -252,9 +255,9 @@ type Option func(*Options)
 //	// Check every 50ms for low-latency delivery
 //	scheduler := NewRedisScheduler(client, transport, WithPollInterval(50*time.Millisecond))
 func WithPollInterval(d time.Duration) Option {
-	return func(o *Options) {
+	return func(o *options) {
 		if d > 0 {
-			o.PollInterval = d
+			o.pollInterval = d
 		}
 	}
 }
@@ -269,9 +272,9 @@ func WithPollInterval(d time.Duration) Option {
 //	// Process up to 500 messages per poll
 //	scheduler := NewRedisScheduler(client, transport, WithBatchSize(500))
 func WithBatchSize(size int) Option {
-	return func(o *Options) {
+	return func(o *options) {
 		if size > 0 {
-			o.BatchSize = size
+			o.batchSize = size
 		}
 	}
 }
@@ -284,9 +287,9 @@ func WithBatchSize(size int) Option {
 //
 //	scheduler := NewRedisScheduler(client, transport, WithKeyPrefix("myapp:scheduler:"))
 func WithKeyPrefix(prefix string) Option {
-	return func(o *Options) {
+	return func(o *options) {
 		if prefix != "" {
-			o.KeyPrefix = prefix
+			o.keyPrefix = prefix
 		}
 	}
 }
@@ -309,9 +312,9 @@ func WithKeyPrefix(prefix string) Option {
 //	    scheduler.WithMetrics(metrics),
 //	)
 func WithMetrics(m *Metrics) Option {
-	return func(o *Options) {
+	return func(o *options) {
 		if m != nil {
-			o.Metrics = m
+			o.metrics = m
 		}
 	}
 }
@@ -339,8 +342,8 @@ func WithMetrics(m *Metrics) Option {
 //	    }),
 //	)
 func WithBackoff(strategy BackoffStrategy) Option {
-	return func(o *Options) {
-		o.Backoff = strategy
+	return func(o *options) {
+		o.backoff = strategy
 	}
 }
 
@@ -359,9 +362,9 @@ func WithBackoff(strategy BackoffStrategy) Option {
 //	    WithMaxRetries(5),
 //	)
 func WithMaxRetries(max int) Option {
-	return func(o *Options) {
+	return func(o *options) {
 		if max >= 0 {
-			o.MaxRetries = max
+			o.maxRetries = max
 		}
 	}
 }

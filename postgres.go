@@ -33,7 +33,7 @@ CREATE INDEX idx_scheduled_due ON scheduled_messages(scheduled_at);
 type PostgresScheduler struct {
 	db        *sql.DB
 	transport transport.Transport
-	opts      *Options
+	opts      *options
 	table     string
 	logger    *slog.Logger
 	stopCh    chan struct{}
@@ -42,7 +42,7 @@ type PostgresScheduler struct {
 
 // NewPostgresScheduler creates a new PostgreSQL-based scheduler
 func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) *PostgresScheduler {
-	o := DefaultOptions()
+	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -103,8 +103,8 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 	}
 
 	// Record metrics
-	if s.opts.Metrics != nil {
-		s.opts.Metrics.RecordScheduled(ctx, msg.EventName)
+	if s.opts.metrics != nil {
+		s.opts.metrics.RecordScheduled(ctx, msg.EventName)
 	}
 
 	s.logger.Debug("scheduled message",
@@ -142,7 +142,7 @@ func (s *PostgresScheduler) ScheduleAfter(ctx context.Context, eventName string,
 func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 	// First, get the event name for metrics if enabled
 	var eventName string
-	if s.opts.Metrics != nil {
+	if s.opts.metrics != nil {
 		query := fmt.Sprintf("SELECT event_name FROM %s WHERE id = $1", s.table)
 		_ = s.db.QueryRowContext(ctx, query, id).Scan(&eventName)
 	}
@@ -160,8 +160,8 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 	}
 
 	// Record metrics
-	if s.opts.Metrics != nil {
-		s.opts.Metrics.RecordCancelled(ctx, eventName)
+	if s.opts.metrics != nil {
+		s.opts.metrics.RecordCancelled(ctx, eventName)
 	}
 
 	s.logger.Debug("cancelled scheduled message", "id", id)
@@ -277,12 +277,12 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 
 // Start begins the scheduler polling loop
 func (s *PostgresScheduler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(s.opts.PollInterval)
+	ticker := time.NewTicker(s.opts.pollInterval)
 	defer ticker.Stop()
 
 	s.logger.Info("scheduler started",
-		"poll_interval", s.opts.PollInterval,
-		"batch_size", s.opts.BatchSize)
+		"poll_interval", s.opts.pollInterval,
+		"batch_size", s.opts.batchSize)
 
 	for {
 		select {
@@ -329,7 +329,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		FOR UPDATE SKIP LOCKED
 	`, s.table)
 
-	rows, err := tx.QueryContext(ctx, query, time.Now(), s.opts.BatchSize)
+	rows, err := tx.QueryContext(ctx, query, time.Now(), s.opts.batchSize)
 	if err != nil {
 		s.logger.Error("failed to query due messages", "error", err)
 		return
@@ -372,8 +372,8 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 				"error", err)
 
 			// Record failure metrics
-			if s.opts.Metrics != nil {
-				s.opts.Metrics.RecordFailed(ctx, msg.EventName, "publish_error")
+			if s.opts.metrics != nil {
+				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
 			}
 
 			continue
@@ -382,8 +382,8 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		toDelete = append(toDelete, msg.ID)
 
 		// Record delivery metrics
-		if s.opts.Metrics != nil {
-			s.opts.Metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
+		if s.opts.metrics != nil {
+			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
 
 		s.logger.Debug("delivered scheduled message",
@@ -449,11 +449,11 @@ func (s *PostgresScheduler) CountPending(ctx context.Context) (int64, error) {
 //	s := scheduler.NewPostgresScheduler(db, transport, scheduler.WithMetrics(metrics))
 //	s.SetupMetricsCallbacks(ctx)
 func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
-	if s.opts.Metrics == nil {
+	if s.opts.metrics == nil {
 		return
 	}
 
-	s.opts.Metrics.SetPendingCallback(func() int64 {
+	s.opts.metrics.SetPendingCallback(func() int64 {
 		count, err := s.CountPending(ctx)
 		if err != nil {
 			s.logger.Error("failed to count pending messages for metrics", "error", err)
@@ -464,7 +464,7 @@ func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
 
 	// PostgreSQL uses FOR UPDATE SKIP LOCKED, so there's no separate "stuck" state
 	// Messages are either pending or being processed in a transaction
-	s.opts.Metrics.SetStuckCallback(func() int64 {
+	s.opts.metrics.SetStuckCallback(func() int64 {
 		return 0
 	})
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/rbaliyan/event/v3/transport/message"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -89,7 +89,7 @@ func FromSchedulerMessage(m *Message) *MongoMessage {
 type MongoScheduler struct {
 	collection    *mongo.Collection
 	transport     transport.Transport
-	opts          *Options
+	opts          *options
 	logger        *slog.Logger
 	stopCh        chan struct{}
 	stoppedCh     chan struct{}
@@ -98,7 +98,7 @@ type MongoScheduler struct {
 
 // NewMongoScheduler creates a new MongoDB-based scheduler
 func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option) *MongoScheduler {
-	o := DefaultOptions()
+	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -191,8 +191,8 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 	}
 
 	// Record metrics
-	if s.opts.Metrics != nil {
-		s.opts.Metrics.RecordScheduled(ctx, msg.EventName)
+	if s.opts.metrics != nil {
+		s.opts.metrics.RecordScheduled(ctx, msg.EventName)
 	}
 
 	s.logger.Debug("scheduled message",
@@ -230,7 +230,7 @@ func (s *MongoScheduler) ScheduleAfter(ctx context.Context, eventName string, pa
 func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
 	// First, get the message to record the event name for metrics
 	var eventName string
-	if s.opts.Metrics != nil {
+	if s.opts.metrics != nil {
 		var mongoMsg MongoMessage
 		err := s.collection.FindOne(ctx, bson.M{"_id": id}).Decode(&mongoMsg)
 		if err == nil {
@@ -250,8 +250,8 @@ func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
 	}
 
 	// Record metrics
-	if s.opts.Metrics != nil {
-		s.opts.Metrics.RecordCancelled(ctx, eventName)
+	if s.opts.metrics != nil {
+		s.opts.metrics.RecordCancelled(ctx, eventName)
 	}
 
 	s.logger.Debug("cancelled scheduled message", "id", id)
@@ -296,7 +296,7 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 		mongoFilter["scheduled_at"].(bson.M)["$lte"] = filter.Before
 	}
 
-	opts := options.Find().SetSort(bson.D{{Key: "scheduled_at", Value: 1}})
+	opts := mongoopts.Find().SetSort(bson.D{{Key: "scheduled_at", Value: 1}})
 	if filter.Limit > 0 {
 		opts.SetLimit(int64(filter.Limit))
 	}
@@ -323,7 +323,7 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 // Also periodically recovers messages stuck in "processing" state
 // (from crashed scheduler instances).
 func (s *MongoScheduler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(s.opts.PollInterval)
+	ticker := time.NewTicker(s.opts.pollInterval)
 	defer ticker.Stop()
 
 	// Recovery ticker for stuck messages (check every minute)
@@ -331,8 +331,8 @@ func (s *MongoScheduler) Start(ctx context.Context) error {
 	defer recoveryTicker.Stop()
 
 	s.logger.Info("scheduler started",
-		"poll_interval", s.opts.PollInterval,
-		"batch_size", s.opts.BatchSize)
+		"poll_interval", s.opts.pollInterval,
+		"batch_size", s.opts.batchSize)
 
 	// Recover any stuck messages at startup
 	s.recoverStuck(ctx)
@@ -374,7 +374,7 @@ func (s *MongoScheduler) Stop(ctx context.Context) error {
 func (s *MongoScheduler) processDue(ctx context.Context) {
 	now := time.Now()
 
-	for i := 0; i < s.opts.BatchSize; i++ {
+	for i := 0; i < s.opts.batchSize; i++ {
 		processingStart := time.Now()
 
 		msg, err := s.claimDue(ctx, now)
@@ -394,8 +394,8 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 				"error", err)
 
 			// Record failure metrics
-			if s.opts.Metrics != nil {
-				s.opts.Metrics.RecordFailed(ctx, msg.EventName, "publish_error")
+			if s.opts.metrics != nil {
+				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
 			}
 
 			// Message stays in processing, will be recovered by recoverStuck
@@ -410,8 +410,8 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 		}
 
 		// Record delivery metrics
-		if s.opts.Metrics != nil {
-			s.opts.Metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
+		if s.opts.metrics != nil {
+			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
 
 		s.logger.Debug("delivered scheduled message",
@@ -437,9 +437,9 @@ func (s *MongoScheduler) claimDue(ctx context.Context, now time.Time) (*Message,
 			"claimed_at": claimedAt,
 		},
 	}
-	opts := options.FindOneAndUpdate().
+	opts := mongoopts.FindOneAndUpdate().
 		SetSort(bson.D{{Key: "scheduled_at", Value: 1}}).
-		SetReturnDocument(options.After)
+		SetReturnDocument(mongoopts.After)
 
 	var mongoMsg MongoMessage
 	err := s.collection.FindOneAndUpdate(ctx, filter, update, opts).Decode(&mongoMsg)
@@ -481,8 +481,8 @@ func (s *MongoScheduler) recoverStuck(ctx context.Context) {
 
 	if result.ModifiedCount > 0 {
 		// Record recovery metrics
-		if s.opts.Metrics != nil {
-			s.opts.Metrics.RecordRecovered(ctx, result.ModifiedCount)
+		if s.opts.metrics != nil {
+			s.opts.metrics.RecordRecovered(ctx, result.ModifiedCount)
 		}
 
 		s.logger.Warn("recovered stuck scheduled messages",
@@ -586,11 +586,11 @@ func (s *MongoScheduler) CountStuck(ctx context.Context) (int64, error) {
 //	s := scheduler.NewMongoScheduler(db, transport, scheduler.WithMetrics(metrics))
 //	s.SetupMetricsCallbacks(ctx)
 func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
-	if s.opts.Metrics == nil {
+	if s.opts.metrics == nil {
 		return
 	}
 
-	s.opts.Metrics.SetPendingCallback(func() int64 {
+	s.opts.metrics.SetPendingCallback(func() int64 {
 		count, err := s.CountPending(ctx)
 		if err != nil {
 			s.logger.Error("failed to count pending messages for metrics", "error", err)
@@ -599,7 +599,7 @@ func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
 		return count
 	})
 
-	s.opts.Metrics.SetStuckCallback(func() int64 {
+	s.opts.metrics.SetStuckCallback(func() int64 {
 		count, err := s.CountStuck(ctx)
 		if err != nil {
 			s.logger.Error("failed to count stuck messages for metrics", "error", err)
