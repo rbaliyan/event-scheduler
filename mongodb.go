@@ -29,7 +29,8 @@ Document structure:
     "scheduled_at": ISODate,
     "created_at": ISODate,
     "status": string (pending/processing),
-    "claimed_at": ISODate (optional, set when processing)
+    "claimed_at": ISODate (optional, set when processing),
+    "retry_count": int (0 by default)
 }
 
 Indexes:
@@ -59,6 +60,7 @@ type MongoMessage struct {
 	CreatedAt   time.Time         `bson:"created_at"`
 	Status      SchedulerStatus   `bson:"status,omitempty"`
 	ClaimedAt   *time.Time        `bson:"claimed_at,omitempty"`
+	RetryCount  int               `bson:"retry_count,omitempty"`
 }
 
 // ToMessage converts MongoMessage to Message
@@ -70,6 +72,7 @@ func (m *MongoMessage) ToMessage() *Message {
 		Metadata:    m.Metadata,
 		ScheduledAt: m.ScheduledAt,
 		CreatedAt:   m.CreatedAt,
+		RetryCount:  m.RetryCount,
 	}
 }
 
@@ -82,6 +85,7 @@ func FromSchedulerMessage(m *Message) *MongoMessage {
 		Metadata:    m.Metadata,
 		ScheduledAt: m.ScheduledAt,
 		CreatedAt:   m.CreatedAt,
+		RetryCount:  m.RetryCount,
 	}
 }
 
@@ -201,29 +205,6 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 		"scheduled_at", msg.ScheduledAt)
 
 	return nil
-}
-
-// ScheduleAt schedules a message for a specific time
-func (s *MongoScheduler) ScheduleAt(ctx context.Context, eventName string, payload []byte, metadata map[string]string, at time.Time) (string, error) {
-	msg := Message{
-		ID:          uuid.New().String(),
-		EventName:   eventName,
-		Payload:     payload,
-		Metadata:    metadata,
-		ScheduledAt: at,
-		CreatedAt:   time.Now(),
-	}
-
-	if err := s.Schedule(ctx, msg); err != nil {
-		return "", err
-	}
-
-	return msg.ID, nil
-}
-
-// ScheduleAfter schedules a message after a delay
-func (s *MongoScheduler) ScheduleAfter(ctx context.Context, eventName string, payload []byte, metadata map[string]string, delay time.Duration) (string, error) {
-	return s.ScheduleAt(ctx, eventName, payload, metadata, time.Now().Add(delay))
 }
 
 // Cancel cancels a scheduled message
@@ -374,6 +355,11 @@ func (s *MongoScheduler) Stop(ctx context.Context) error {
 func (s *MongoScheduler) processDue(ctx context.Context) {
 	now := time.Now()
 
+	// Reset backoff state at the start of each processing cycle
+	if s.opts.backoff != nil {
+		s.opts.backoff.Reset()
+	}
+
 	for i := 0; i < s.opts.batchSize; i++ {
 		processingStart := time.Now()
 
@@ -387,18 +373,71 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 		}
 
 		// Publish to transport
-		if err := s.publishMessage(ctx, msg); err != nil {
+		if publishErr := s.publishMessage(ctx, msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
-				"error", err)
+				"error", publishErr,
+				"retry_count", msg.RetryCount)
 
 			// Record failure metrics
 			if s.opts.metrics != nil {
 				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
 			}
 
-			// Message stays in processing, will be recovered by recoverStuck
+			// Check if max retries exceeded
+			if s.opts.maxRetries > 0 && msg.RetryCount >= s.opts.maxRetries {
+				s.logger.Error("scheduled message exceeded max retries, discarding",
+					"id", msg.ID,
+					"event", msg.EventName,
+					"retry_count", msg.RetryCount,
+					"max_retries", s.opts.maxRetries)
+
+				// Send to DLQ if configured
+				if s.opts.dlq != nil {
+					if dlqErr := s.opts.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, publishErr, msg.RetryCount, "scheduler"); dlqErr != nil {
+						s.logger.Error("failed to send message to DLQ",
+							"id", msg.ID,
+							"error", dlqErr)
+					} else if s.opts.metrics != nil {
+						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
+					}
+				}
+
+				// Delete the message
+				s.deleteClaimed(ctx, msg.ID)
+				continue
+			}
+
+			// Increment retry count and calculate next retry time
+			newRetryCount := msg.RetryCount + 1
+			nextRetryAt := time.Now()
+			if s.opts.backoff != nil {
+				backoffDelay := s.opts.backoff.NextDelay(newRetryCount - 1)
+				nextRetryAt = nextRetryAt.Add(backoffDelay)
+				s.logger.Debug("scheduling retry with backoff",
+					"id", msg.ID,
+					"retry_count", newRetryCount,
+					"backoff_delay", backoffDelay,
+					"next_retry_at", nextRetryAt)
+			}
+
+			// Update document: reset status to pending, increment retry_count, set new scheduled_at
+			_, updateErr := s.collection.UpdateByID(ctx, msg.ID, bson.M{
+				"$set": bson.M{
+					"status":       SchedulerStatusPending,
+					"retry_count":  newRetryCount,
+					"scheduled_at": nextRetryAt,
+				},
+				"$unset": bson.M{
+					"claimed_at": "",
+				},
+			})
+			if updateErr != nil {
+				s.logger.Error("failed to update message for retry",
+					"id", msg.ID,
+					"error", updateErr)
+			}
 			continue
 		}
 

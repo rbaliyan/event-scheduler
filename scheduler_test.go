@@ -310,26 +310,6 @@ func (m *memoryScheduler) Schedule(ctx context.Context, msg Message) error {
 	return nil
 }
 
-func (m *memoryScheduler) ScheduleAt(ctx context.Context, eventName string, payload []byte, metadata map[string]string, at time.Time) (string, error) {
-	id := fmt.Sprintf("mem-%d", time.Now().UnixNano())
-	msg := Message{
-		ID:          id,
-		EventName:   eventName,
-		Payload:     payload,
-		Metadata:    metadata,
-		ScheduledAt: at,
-		CreatedAt:   time.Now(),
-	}
-	if err := m.Schedule(ctx, msg); err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
-func (m *memoryScheduler) ScheduleAfter(ctx context.Context, eventName string, payload []byte, metadata map[string]string, delay time.Duration) (string, error) {
-	return m.ScheduleAt(ctx, eventName, payload, metadata, time.Now().Add(delay))
-}
-
 func (m *memoryScheduler) Cancel(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -435,52 +415,6 @@ func TestSchedulerContract_ScheduleAndGet(t *testing.T) {
 	}
 	if got.Metadata["key"] != "val" {
 		t.Errorf("expected metadata key 'key' = 'val'")
-	}
-}
-
-func TestSchedulerContract_ScheduleAt(t *testing.T) {
-	s := newMemoryScheduler()
-	ctx := context.Background()
-
-	at := time.Now().Add(2 * time.Hour)
-	id, err := s.ScheduleAt(ctx, "test.event", []byte("payload"), nil, at)
-	if err != nil {
-		t.Fatalf("ScheduleAt() error: %v", err)
-	}
-	if id == "" {
-		t.Error("expected non-empty ID")
-	}
-
-	got, err := s.Get(ctx, id)
-	if err != nil {
-		t.Fatalf("Get() error: %v", err)
-	}
-	if got.EventName != "test.event" {
-		t.Errorf("expected EventName 'test.event', got %q", got.EventName)
-	}
-}
-
-func TestSchedulerContract_ScheduleAfter(t *testing.T) {
-	s := newMemoryScheduler()
-	ctx := context.Background()
-
-	before := time.Now()
-	id, err := s.ScheduleAfter(ctx, "delayed.event", []byte("data"), nil, time.Hour)
-	if err != nil {
-		t.Fatalf("ScheduleAfter() error: %v", err)
-	}
-	if id == "" {
-		t.Error("expected non-empty ID")
-	}
-
-	got, err := s.Get(ctx, id)
-	if err != nil {
-		t.Fatalf("Get() error: %v", err)
-	}
-
-	expectedEarliest := before.Add(time.Hour)
-	if got.ScheduledAt.Before(expectedEarliest.Add(-time.Second)) {
-		t.Errorf("ScheduledAt %v is too early (expected around %v)", got.ScheduledAt, expectedEarliest)
 	}
 }
 
@@ -716,5 +650,58 @@ func TestSchedulerContract_StartCancelledContext(t *testing.T) {
 	err := <-errCh
 	if err != context.Canceled {
 		t.Errorf("expected context.Canceled, got %v", err)
+	}
+}
+
+// --- DLQ tests ---
+
+// mockDLQ implements DeadLetterQueue for testing.
+type mockDLQ struct {
+	mu       sync.Mutex
+	messages []dlqEntry
+}
+
+type dlqEntry struct {
+	EventName  string
+	OriginalID string
+	Payload    []byte
+	Metadata   map[string]string
+	Err        error
+	RetryCount int
+	Source     string
+}
+
+func (m *mockDLQ) Store(ctx context.Context, eventName, originalID string, payload []byte, metadata map[string]string, err error, retryCount int, source string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messages = append(m.messages, dlqEntry{
+		EventName:  eventName,
+		OriginalID: originalID,
+		Payload:    payload,
+		Metadata:   metadata,
+		Err:        err,
+		RetryCount: retryCount,
+		Source:     source,
+	})
+	return nil
+}
+
+// Compile-time check that mockDLQ satisfies DeadLetterQueue
+var _ DeadLetterQueue = (*mockDLQ)(nil)
+
+func TestWithDLQ(t *testing.T) {
+	o := defaultOptions()
+	d := &mockDLQ{}
+	WithDLQ(d)(o)
+	if o.dlq == nil {
+		t.Error("expected dlq to be set")
+	}
+}
+
+func TestWithDLQ_Nil(t *testing.T) {
+	o := defaultOptions()
+	WithDLQ(nil)(o)
+	if o.dlq != nil {
+		t.Error("expected dlq to remain nil")
 	}
 }

@@ -35,6 +35,7 @@ type Metrics struct {
 	failedTotal     metric.Int64Counter
 	cancelledTotal  metric.Int64Counter
 	recoveredTotal  metric.Int64Counter
+	dlqSentTotal    metric.Int64Counter
 
 	// Gauges (using UpDownCounter for gauge-like behavior)
 	pendingMessages metric.Int64ObservableGauge
@@ -158,6 +159,15 @@ func NewMetrics(opts ...MetricsOption) (*Metrics, error) {
 	m.recoveredTotal, err = meter.Int64Counter(
 		prefix+"scheduled_messages_recovered_total",
 		metric.WithDescription("Total number of stuck messages recovered"),
+		metric.WithUnit("{message}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.dlqSentTotal, err = meter.Int64Counter(
+		prefix+"scheduled_messages_dlq_total",
+		metric.WithDescription("Total number of messages sent to dead-letter queue"),
 		metric.WithUnit("{message}"),
 	)
 	if err != nil {
@@ -330,6 +340,13 @@ func (m *Metrics) RecordRecovered(ctx context.Context, count int64) {
 	if count > 0 {
 		m.recoveredTotal.Add(ctx, count)
 	}
+}
+
+// RecordDLQSent records that a message was sent to the dead-letter queue.
+func (m *Metrics) RecordDLQSent(ctx context.Context, eventName string) {
+	m.dlqSentTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("event", eventName),
+	))
 }
 
 // Close unregisters the metrics callbacks.

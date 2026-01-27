@@ -44,7 +44,11 @@ import (
 //	go scheduler.Start(ctx)
 //
 //	// Schedule messages
-//	scheduler.ScheduleAfter(ctx, "orders.reminder", payload, nil, time.Hour)
+//	scheduler.Schedule(ctx, scheduler.Message{
+//	    EventName:   "orders.reminder",
+//	    Payload:     payload,
+//	    ScheduledAt: time.Now().Add(time.Hour),
+//	})
 //
 //	// Stop gracefully
 //	scheduler.Stop(ctx)
@@ -141,35 +145,6 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 		"scheduled_at", msg.ScheduledAt)
 
 	return nil
-}
-
-// ScheduleAt schedules a message for a specific time.
-//
-// Convenience method that creates a Message and calls Schedule.
-// Returns the generated message ID.
-func (s *RedisScheduler) ScheduleAt(ctx context.Context, eventName string, payload []byte, metadata map[string]string, at time.Time) (string, error) {
-	msg := Message{
-		ID:          uuid.New().String(),
-		EventName:   eventName,
-		Payload:     payload,
-		Metadata:    metadata,
-		ScheduledAt: at,
-		CreatedAt:   time.Now(),
-	}
-
-	if err := s.Schedule(ctx, msg); err != nil {
-		return "", err
-	}
-
-	return msg.ID, nil
-}
-
-// ScheduleAfter schedules a message after a delay.
-//
-// Convenience method that calls ScheduleAt with time.Now().Add(delay).
-// Returns the generated message ID.
-func (s *RedisScheduler) ScheduleAfter(ctx context.Context, eventName string, payload []byte, metadata map[string]string, delay time.Duration) (string, error) {
-	return s.ScheduleAt(ctx, eventName, payload, metadata, time.Now().Add(delay))
 }
 
 // Cancel cancels a scheduled message before delivery.
@@ -385,6 +360,17 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 					"event", msg.EventName,
 					"retry_count", msg.RetryCount,
 					"max_retries", s.opts.maxRetries)
+
+				// Send to DLQ if configured
+				if s.opts.dlq != nil {
+					if dlqErr := s.opts.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, err, msg.RetryCount, "scheduler"); dlqErr != nil {
+						s.logger.Error("failed to send message to DLQ",
+							"id", msg.ID,
+							"error", dlqErr)
+					} else if s.opts.metrics != nil {
+						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
+					}
+				}
 				continue
 			}
 

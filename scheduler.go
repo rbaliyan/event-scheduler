@@ -28,14 +28,6 @@
 //	    ScheduledAt: time.Now().Add(time.Hour),
 //	})
 //
-// # Convenience Methods
-//
-//	// Schedule for a specific time
-//	id, err := scheduler.ScheduleAt(ctx, "orders.reminder", payload, metadata, futureTime)
-//
-//	// Schedule after a delay
-//	id, err := scheduler.ScheduleAfter(ctx, "orders.reminder", payload, metadata, time.Hour)
-//
 // # Cancellation
 //
 //	// Cancel a scheduled message
@@ -117,14 +109,6 @@ type Scheduler interface {
 	// The message will be published to EventName at ScheduledAt.
 	Schedule(ctx context.Context, msg Message) error
 
-	// ScheduleAt is a convenience method to schedule for a specific time.
-	// Returns the generated message ID.
-	ScheduleAt(ctx context.Context, eventName string, payload []byte, metadata map[string]string, at time.Time) (string, error)
-
-	// ScheduleAfter is a convenience method to schedule after a delay.
-	// Returns the generated message ID.
-	ScheduleAfter(ctx context.Context, eventName string, payload []byte, metadata map[string]string, delay time.Duration) (string, error)
-
 	// Cancel cancels a scheduled message before delivery.
 	// Returns error if message not found.
 	Cancel(ctx context.Context, id string) error
@@ -187,6 +171,17 @@ type BackoffStrategy interface {
 	Reset()
 }
 
+// DeadLetterQueue defines the interface for dead-letter queue storage.
+// This provides loose coupling so the scheduler doesn't depend directly
+// on the dlq package. The dlq.Manager from github.com/rbaliyan/event-dlq
+// satisfies this interface.
+//
+// Implementations must be safe for concurrent use.
+type DeadLetterQueue interface {
+	// Store adds a failed message to the dead-letter queue.
+	Store(ctx context.Context, eventName, originalID string, payload []byte, metadata map[string]string, err error, retryCount int, source string) error
+}
+
 // options configures the scheduler behavior.
 //
 // Use the With* functions to configure options:
@@ -224,6 +219,11 @@ type options struct {
 	// After MaxRetries attempts, the message is removed from the scheduler
 	// and the failure is logged.
 	maxRetries int
+
+	// dlq is the optional dead-letter queue for messages that exceed maxRetries.
+	// When nil, messages that exceed maxRetries are simply discarded.
+	// When set, messages are sent to the DLQ before being removed.
+	dlq DeadLetterQueue
 }
 
 // defaultOptions returns default scheduler options.
@@ -366,5 +366,27 @@ func WithMaxRetries(max int) Option {
 		if max >= 0 {
 			o.maxRetries = max
 		}
+	}
+}
+
+// WithDLQ sets the dead-letter queue for messages that exceed max retries.
+//
+// When a message fails delivery and has exceeded the configured MaxRetries,
+// it will be sent to the DLQ before being removed from the scheduler.
+// This prevents permanent message loss.
+//
+// The dlq.Manager from github.com/rbaliyan/event-dlq satisfies the
+// DeadLetterQueue interface and can be used directly.
+//
+// Example:
+//
+//	dlqManager := dlq.NewManager(dlqStore, transport)
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithMaxRetries(5),
+//	    WithDLQ(dlqManager),
+//	)
+func WithDLQ(d DeadLetterQueue) Option {
+	return func(o *options) {
+		o.dlq = d
 	}
 }

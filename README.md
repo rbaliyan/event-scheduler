@@ -52,14 +52,25 @@ func main() {
 
     // Schedule a message for delivery in 1 hour
     payload, _ := json.Marshal(map[string]string{"order_id": "12345"})
-    id, err := sched.ScheduleAfter(ctx, "orders.reminder", payload, nil, time.Hour)
+    id := uuid.New().String()
+    err := sched.Schedule(ctx, scheduler.Message{
+        ID:          id,
+        EventName:   "orders.reminder",
+        Payload:     payload,
+        ScheduledAt: time.Now().Add(time.Hour),
+    })
     if err != nil {
         panic(err)
     }
 
     // Or schedule for a specific time
     deliveryTime := time.Now().Add(24 * time.Hour)
-    id, err = sched.ScheduleAt(ctx, "orders.reminder", payload, nil, deliveryTime)
+    err = sched.Schedule(ctx, scheduler.Message{
+        ID:          uuid.New().String(),
+        EventName:   "orders.reminder",
+        Payload:     payload,
+        ScheduledAt: deliveryTime,
+    })
     if err != nil {
         panic(err)
     }
@@ -182,12 +193,6 @@ All scheduler implementations provide the same interface:
 type Scheduler interface {
     // Schedule adds a message for future delivery
     Schedule(ctx context.Context, msg Message) error
-
-    // ScheduleAt schedules for a specific time (returns message ID)
-    ScheduleAt(ctx context.Context, eventName string, payload []byte, metadata map[string]string, at time.Time) (string, error)
-
-    // ScheduleAfter schedules after a delay (returns message ID)
-    ScheduleAfter(ctx context.Context, eventName string, payload []byte, metadata map[string]string, delay time.Duration) (string, error)
 
     // Cancel cancels a scheduled message
     Cancel(ctx context.Context, id string) error

@@ -23,7 +23,8 @@ CREATE TABLE scheduled_messages (
     payload      BYTEA NOT NULL,
     metadata     JSONB,
     scheduled_at TIMESTAMP NOT NULL,
-    created_at   TIMESTAMP NOT NULL DEFAULT NOW()
+    created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+    retry_count  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX idx_scheduled_due ON scheduled_messages(scheduled_at);
@@ -85,8 +86,8 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 	}
 
 	query := fmt.Sprintf(`
-		INSERT INTO %s (id, event_name, payload, metadata, scheduled_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO %s (id, event_name, payload, metadata, scheduled_at, created_at, retry_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`, s.table)
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -96,6 +97,7 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		metadata,
 		msg.ScheduledAt,
 		msg.CreatedAt,
+		msg.RetryCount,
 	)
 
 	if err != nil {
@@ -113,29 +115,6 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		"scheduled_at", msg.ScheduledAt)
 
 	return nil
-}
-
-// ScheduleAt schedules a message for a specific time
-func (s *PostgresScheduler) ScheduleAt(ctx context.Context, eventName string, payload []byte, metadata map[string]string, at time.Time) (string, error) {
-	msg := Message{
-		ID:          uuid.New().String(),
-		EventName:   eventName,
-		Payload:     payload,
-		Metadata:    metadata,
-		ScheduledAt: at,
-		CreatedAt:   time.Now(),
-	}
-
-	if err := s.Schedule(ctx, msg); err != nil {
-		return "", err
-	}
-
-	return msg.ID, nil
-}
-
-// ScheduleAfter schedules a message after a delay
-func (s *PostgresScheduler) ScheduleAfter(ctx context.Context, eventName string, payload []byte, metadata map[string]string, delay time.Duration) (string, error) {
-	return s.ScheduleAt(ctx, eventName, payload, metadata, time.Now().Add(delay))
 }
 
 // Cancel cancels a scheduled message
@@ -171,7 +150,7 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 // Get retrieves a scheduled message by ID
 func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error) {
 	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at
+		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
 		WHERE id = $1
 	`, s.table)
@@ -186,6 +165,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 		&metadata,
 		&msg.ScheduledAt,
 		&msg.CreatedAt,
+		&msg.RetryCount,
 	)
 
 	if err == sql.ErrNoRows {
@@ -207,7 +187,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 // List returns scheduled messages
 func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message, error) {
 	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at
+		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
 		WHERE 1=1
 	`, s.table)
@@ -258,6 +238,7 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 			&metadata,
 			&msg.ScheduledAt,
 			&msg.CreatedAt,
+			&msg.RetryCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
@@ -312,6 +293,11 @@ func (s *PostgresScheduler) Stop(ctx context.Context) error {
 
 // processDue processes messages that are due for delivery
 func (s *PostgresScheduler) processDue(ctx context.Context) {
+	// Reset backoff state at the start of each processing cycle
+	if s.opts.backoff != nil {
+		s.opts.backoff.Reset()
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		s.logger.Error("failed to begin transaction", "error", err)
@@ -321,7 +307,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 
 	// Lock and fetch due messages
 	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at
+		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
 		WHERE scheduled_at <= $1
 		ORDER BY scheduled_at ASC
@@ -337,6 +323,13 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 	defer rows.Close()
 
 	var toDelete []string
+	var toDiscard []string // exceeded maxRetries
+	type retryUpdate struct {
+		ID         string
+		RetryCount int
+		NextRetry  time.Time
+	}
+	var toRetry []retryUpdate
 
 	for rows.Next() {
 		processingStart := time.Now()
@@ -351,6 +344,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 			&metadata,
 			&msg.ScheduledAt,
 			&msg.CreatedAt,
+			&msg.RetryCount,
 		)
 		if err != nil {
 			s.logger.Error("failed to scan message", "error", err)
@@ -365,17 +359,59 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		}
 
 		// Publish to transport
-		if err := s.publishMessage(ctx, &msg); err != nil {
+		if publishErr := s.publishMessage(ctx, &msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
-				"error", err)
+				"error", publishErr,
+				"retry_count", msg.RetryCount)
 
 			// Record failure metrics
 			if s.opts.metrics != nil {
 				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
 			}
 
+			// Check if max retries exceeded
+			if s.opts.maxRetries > 0 && msg.RetryCount >= s.opts.maxRetries {
+				s.logger.Error("scheduled message exceeded max retries, discarding",
+					"id", msg.ID,
+					"event", msg.EventName,
+					"retry_count", msg.RetryCount,
+					"max_retries", s.opts.maxRetries)
+
+				// Send to DLQ if configured
+				if s.opts.dlq != nil {
+					if dlqErr := s.opts.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, publishErr, msg.RetryCount, "scheduler"); dlqErr != nil {
+						s.logger.Error("failed to send message to DLQ",
+							"id", msg.ID,
+							"error", dlqErr)
+					} else if s.opts.metrics != nil {
+						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
+					}
+				}
+
+				toDiscard = append(toDiscard, msg.ID)
+				continue
+			}
+
+			// Schedule retry with backoff
+			newRetryCount := msg.RetryCount + 1
+			nextRetryAt := time.Now()
+			if s.opts.backoff != nil {
+				backoffDelay := s.opts.backoff.NextDelay(newRetryCount - 1)
+				nextRetryAt = nextRetryAt.Add(backoffDelay)
+				s.logger.Debug("scheduling retry with backoff",
+					"id", msg.ID,
+					"retry_count", newRetryCount,
+					"backoff_delay", backoffDelay,
+					"next_retry_at", nextRetryAt)
+			}
+
+			toRetry = append(toRetry, retryUpdate{
+				ID:         msg.ID,
+				RetryCount: newRetryCount,
+				NextRetry:  nextRetryAt,
+			})
 			continue
 		}
 
@@ -398,6 +434,29 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		if err != nil {
 			s.logger.Error("failed to delete delivered messages", "error", err)
 			return
+		}
+	}
+
+	// Delete discarded messages (max retries exceeded)
+	if len(toDiscard) > 0 {
+		discardQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table)
+		_, err = tx.ExecContext(ctx, discardQuery, toDiscard)
+		if err != nil {
+			s.logger.Error("failed to delete discarded messages", "error", err)
+			return
+		}
+	}
+
+	// Update messages for retry (new scheduled_at + incremented retry_count)
+	for _, r := range toRetry {
+		updateQuery := fmt.Sprintf(
+			"UPDATE %s SET retry_count = $1, scheduled_at = $2 WHERE id = $3",
+			s.table)
+		_, err = tx.ExecContext(ctx, updateQuery, r.RetryCount, r.NextRetry, r.ID)
+		if err != nil {
+			s.logger.Error("failed to update message for retry",
+				"id", r.ID,
+				"error", err)
 		}
 	}
 
@@ -426,6 +485,34 @@ func (s *PostgresScheduler) publishMessage(ctx context.Context, msg *Message) er
 	)
 
 	return s.transport.Publish(ctx, msg.EventName, transportMsg)
+}
+
+// EnsureTable creates the scheduled_messages table if it doesn't exist.
+func (s *PostgresScheduler) EnsureTable(ctx context.Context) error {
+	query := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id           VARCHAR(36) PRIMARY KEY,
+			event_name   VARCHAR(255) NOT NULL,
+			payload      BYTEA NOT NULL,
+			metadata     JSONB,
+			scheduled_at TIMESTAMP NOT NULL,
+			created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+			retry_count  INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_%s_scheduled_due ON %s(scheduled_at);
+	`, s.table, s.table, s.table)
+	_, err := s.db.ExecContext(ctx, query)
+	return err
+}
+
+// MigrateAddRetryCount adds the retry_count column to an existing table.
+// Safe to call multiple times; uses ADD COLUMN IF NOT EXISTS.
+func (s *PostgresScheduler) MigrateAddRetryCount(ctx context.Context) error {
+	query := fmt.Sprintf(
+		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
+		s.table)
+	_, err := s.db.ExecContext(ctx, query)
+	return err
 }
 
 // CountPending returns the number of pending scheduled messages.
