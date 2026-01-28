@@ -18,10 +18,13 @@ import (
 func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*MongoScheduler, func()) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, mongoopts.Client().ApplyURI(getMongoURI()))
+	client, err := mongo.Connect(ctx, mongoopts.Client().
+		ApplyURI(getMongoURI()).
+		SetServerSelectionTimeout(2*time.Second).
+		SetConnectTimeout(2*time.Second))
 	if err != nil {
 		t.Skipf("MongoDB not available: %v", err)
 	}
