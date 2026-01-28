@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rbaliyan/event/v3/transport"
-	"github.com/rbaliyan/event/v3/transport/message"
 	"github.com/redis/go-redis/v9"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // RedisScheduler uses Redis sorted sets for scheduling.
@@ -59,6 +58,7 @@ type RedisScheduler struct {
 	logger        *slog.Logger
 	stopCh        chan struct{}
 	stoppedCh     chan struct{}
+	stopOnce      sync.Once
 	stuckDuration time.Duration // How long before a processing message is considered stuck
 }
 
@@ -180,7 +180,7 @@ func (s *RedisScheduler) Cancel(ctx context.Context, id string) error {
 		}
 	}
 
-	return fmt.Errorf("message not found: %s", id)
+	return fmt.Errorf("%s: %w", id, ErrNotFound)
 }
 
 // Get retrieves a scheduled message by ID.
@@ -204,7 +204,7 @@ func (s *RedisScheduler) Get(ctx context.Context, id string) (*Message, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("message not found: %s", id)
+	return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 }
 
 // List returns scheduled messages matching the filter.
@@ -298,7 +298,9 @@ func (s *RedisScheduler) Start(ctx context.Context) error {
 // Signals the polling loop to stop and waits for it to finish.
 // Returns context error if the context expires before stopping.
 func (s *RedisScheduler) Stop(ctx context.Context) error {
-	close(s.stopCh)
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 
 	select {
 	case <-s.stoppedCh:
@@ -338,7 +340,7 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 		}
 
 		// Publish to transport
-		if err := s.publishMessage(ctx, msg); err != nil {
+		if err := publishScheduledMessage(ctx, s.transport, msg); err != nil {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
@@ -513,30 +515,6 @@ func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 			"count", recovered,
 			"stuck_duration", s.stuckDuration)
 	}
-}
-
-// publishMessage publishes a scheduled message to the transport.
-//
-// Adds scheduler metadata (scheduled_message_id, scheduled_at) to the message.
-func (s *RedisScheduler) publishMessage(ctx context.Context, msg *Message) error {
-	// Add scheduler metadata
-	metadata := make(map[string]string)
-	for k, v := range msg.Metadata {
-		metadata[k] = v
-	}
-	metadata["scheduled_message_id"] = msg.ID
-	metadata["scheduled_at"] = msg.ScheduledAt.Format(time.RFC3339)
-
-	// Create transport message
-	transportMsg := message.New(
-		msg.ID,
-		"scheduler",
-		msg.Payload,
-		metadata,
-		trace.SpanContext{},
-	)
-
-	return s.transport.Publish(ctx, msg.EventName, transportMsg)
 }
 
 // key returns the Redis key for the scheduled messages sorted set.

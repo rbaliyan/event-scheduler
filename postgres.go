@@ -6,12 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rbaliyan/event/v3/transport"
-	"github.com/rbaliyan/event/v3/transport/message"
-	"go.opentelemetry.io/otel/trace"
 )
 
 /*
@@ -39,6 +38,7 @@ type PostgresScheduler struct {
 	logger    *slog.Logger
 	stopCh    chan struct{}
 	stoppedCh chan struct{}
+	stopOnce  sync.Once
 }
 
 // NewPostgresScheduler creates a new PostgreSQL-based scheduler
@@ -135,7 +135,7 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("message not found: %s", id)
+		return fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 
 	// Record metrics
@@ -169,7 +169,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 	)
 
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("message not found: %s", id)
+		return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
@@ -281,7 +281,9 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 
 // Stop gracefully stops the scheduler
 func (s *PostgresScheduler) Stop(ctx context.Context) error {
-	close(s.stopCh)
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 
 	select {
 	case <-s.stoppedCh:
@@ -359,7 +361,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		}
 
 		// Publish to transport
-		if publishErr := s.publishMessage(ctx, &msg); publishErr != nil {
+		if publishErr := publishScheduledMessage(ctx, s.transport, &msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
@@ -463,28 +465,6 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 	if err := tx.Commit(); err != nil {
 		s.logger.Error("failed to commit transaction", "error", err)
 	}
-}
-
-// publishMessage publishes a scheduled message to the transport
-func (s *PostgresScheduler) publishMessage(ctx context.Context, msg *Message) error {
-	// Add scheduler metadata
-	metadata := make(map[string]string)
-	for k, v := range msg.Metadata {
-		metadata[k] = v
-	}
-	metadata["scheduled_message_id"] = msg.ID
-	metadata["scheduled_at"] = msg.ScheduledAt.Format(time.RFC3339)
-
-	// Create transport message
-	transportMsg := message.New(
-		msg.ID,
-		"scheduler",
-		msg.Payload,
-		metadata,
-		trace.SpanContext{},
-	)
-
-	return s.transport.Publish(ctx, msg.EventName, transportMsg)
 }
 
 // EnsureTable creates the scheduled_messages table if it doesn't exist.

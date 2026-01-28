@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -281,6 +282,7 @@ type memoryScheduler struct {
 	messages map[string]*Message
 	stopCh   chan struct{}
 	stopped  chan struct{}
+	stopOnce sync.Once
 }
 
 func newMemoryScheduler() *memoryScheduler {
@@ -315,7 +317,7 @@ func (m *memoryScheduler) Cancel(ctx context.Context, id string) error {
 	defer m.mu.Unlock()
 
 	if _, exists := m.messages[id]; !exists {
-		return fmt.Errorf("message not found: %s", id)
+		return fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 	delete(m.messages, id)
 	return nil
@@ -327,7 +329,7 @@ func (m *memoryScheduler) Get(ctx context.Context, id string) (*Message, error) 
 
 	msg, exists := m.messages[id]
 	if !exists {
-		return nil, fmt.Errorf("message not found: %s", id)
+		return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 	return msg, nil
 }
@@ -367,7 +369,9 @@ func (m *memoryScheduler) Start(ctx context.Context) error {
 }
 
 func (m *memoryScheduler) Stop(ctx context.Context) error {
-	close(m.stopCh)
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+	})
 	select {
 	case <-m.stopped:
 		return nil
@@ -703,5 +707,76 @@ func TestWithDLQ_Nil(t *testing.T) {
 	WithDLQ(nil)(o)
 	if o.dlq != nil {
 		t.Error("expected dlq to remain nil")
+	}
+}
+
+// --- ErrNotFound tests ---
+
+func TestErrNotFound_Cancel(t *testing.T) {
+	s := newMemoryScheduler()
+	ctx := context.Background()
+
+	err := s.Cancel(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected errors.Is(err, ErrNotFound), got %v", err)
+	}
+}
+
+func TestErrNotFound_Get(t *testing.T) {
+	s := newMemoryScheduler()
+	ctx := context.Background()
+
+	_, err := s.Get(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected errors.Is(err, ErrNotFound), got %v", err)
+	}
+}
+
+func TestErrNotFound_ContainsID(t *testing.T) {
+	s := newMemoryScheduler()
+	ctx := context.Background()
+
+	_, err := s.Get(ctx, "specific-id-123")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	errStr := err.Error()
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected errors.Is(err, ErrNotFound)")
+	}
+	if errStr != "specific-id-123: scheduled message not found" {
+		t.Errorf("expected error to contain ID, got %q", errStr)
+	}
+}
+
+// --- Double Stop tests ---
+
+func TestDoubleStop_NoPanic(t *testing.T) {
+	s := newMemoryScheduler()
+	ctx := context.Background()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.Start(ctx)
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := s.Stop(stopCtx); err != nil {
+		t.Fatalf("first Stop() error: %v", err)
+	}
+	<-errCh
+
+	// Second Stop should not panic
+	if err := s.Stop(stopCtx); err != nil {
+		t.Fatalf("second Stop() error: %v", err)
 	}
 }

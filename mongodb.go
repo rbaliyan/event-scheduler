@@ -4,15 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/rbaliyan/event/v3/transport"
-	"github.com/rbaliyan/event/v3/transport/message"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
-	"go.opentelemetry.io/otel/trace"
 )
 
 /*
@@ -97,6 +96,7 @@ type MongoScheduler struct {
 	logger        *slog.Logger
 	stopCh        chan struct{}
 	stoppedCh     chan struct{}
+	stopOnce      sync.Once
 	stuckDuration time.Duration // How long before a processing message is considered stuck
 }
 
@@ -227,7 +227,7 @@ func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
 	}
 
 	if result.DeletedCount == 0 {
-		return fmt.Errorf("message not found: %s", id)
+		return fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 
 	// Record metrics
@@ -247,7 +247,7 @@ func (s *MongoScheduler) Get(ctx context.Context, id string) (*Message, error) {
 	err := s.collection.FindOne(ctx, filter).Decode(&mongoMsg)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			return nil, fmt.Errorf("message not found: %s", id)
+			return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 		}
 		return nil, fmt.Errorf("find: %w", err)
 	}
@@ -336,7 +336,9 @@ func (s *MongoScheduler) Start(ctx context.Context) error {
 
 // Stop gracefully stops the scheduler
 func (s *MongoScheduler) Stop(ctx context.Context) error {
-	close(s.stopCh)
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+	})
 
 	select {
 	case <-s.stoppedCh:
@@ -373,7 +375,7 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 		}
 
 		// Publish to transport
-		if publishErr := s.publishMessage(ctx, msg); publishErr != nil {
+		if publishErr := publishScheduledMessage(ctx, s.transport, msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
@@ -528,28 +530,6 @@ func (s *MongoScheduler) recoverStuck(ctx context.Context) {
 			"count", result.ModifiedCount,
 			"stuck_duration", s.stuckDuration)
 	}
-}
-
-// publishMessage publishes a scheduled message to the transport
-func (s *MongoScheduler) publishMessage(ctx context.Context, msg *Message) error {
-	// Add scheduler metadata
-	metadata := make(map[string]string)
-	for k, v := range msg.Metadata {
-		metadata[k] = v
-	}
-	metadata["scheduled_message_id"] = msg.ID
-	metadata["scheduled_at"] = msg.ScheduledAt.Format(time.RFC3339)
-
-	// Create transport message
-	transportMsg := message.New(
-		msg.ID,
-		"scheduler",
-		msg.Payload,
-		metadata,
-		trace.SpanContext{},
-	)
-
-	return s.transport.Publish(ctx, msg.EventName, transportMsg)
 }
 
 // Count returns the number of scheduled messages
