@@ -458,8 +458,12 @@ func (s *RedisScheduler) claimDueMessage(ctx context.Context, now int64) (*Messa
 
 	var msg Message
 	if err := json.Unmarshal([]byte(member), &msg); err != nil {
-		// Corrupt message - remove from processing
+		// Corrupt message - remove from processing and clean index
 		s.client.ZRem(ctx, s.processingKey(), member)
+		var partial struct{ ID string }
+		if json.Unmarshal([]byte(member), &partial) == nil && partial.ID != "" {
+			s.client.HDel(ctx, s.indexKey(), partial.ID)
+		}
 		s.logger.Error("failed to unmarshal claimed message", "error", err)
 		return nil, "", redis.Nil
 	}
@@ -494,8 +498,13 @@ func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 
 		var msg Message
 		if err := json.Unmarshal([]byte(member), &msg); err != nil {
-			// Corrupt message - just remove it
+			// Corrupt message - remove from processing and clean index
 			s.client.ZRem(ctx, s.processingKey(), member)
+			// Try partial decode for ID to clean index
+			var partial struct{ ID string }
+			if json.Unmarshal([]byte(member), &partial) == nil && partial.ID != "" {
+				s.client.HDel(ctx, s.indexKey(), partial.ID)
+			}
 			continue
 		}
 

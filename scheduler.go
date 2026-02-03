@@ -53,8 +53,13 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
+	"regexp"
 	"time"
 )
+
+// validIdentifier matches safe SQL/collection identifiers (alphanumeric and underscores).
+var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // Message represents a scheduled message.
 //
@@ -316,6 +321,9 @@ func WithKeyPrefix(prefix string) Option {
 func WithTable(table string) Option {
 	return func(o *options) {
 		if table != "" {
+			if !validIdentifier.MatchString(table) {
+				panic(fmt.Sprintf("scheduler: invalid table name %q", table))
+			}
 			o.table = table
 		}
 	}
@@ -331,6 +339,9 @@ func WithTable(table string) Option {
 func WithCollection(collection string) Option {
 	return func(o *options) {
 		if collection != "" {
+			if !validIdentifier.MatchString(collection) {
+				panic(fmt.Sprintf("scheduler: invalid collection name %q", collection))
+			}
 			o.collection = collection
 		}
 	}
