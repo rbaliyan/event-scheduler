@@ -124,14 +124,15 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("marshal message: %w", err)
 	}
 
-	// Store in sorted set with scheduled time as score
-	err = s.client.ZAdd(ctx, s.key(), redis.Z{
+	// Store in sorted set with scheduled time as score and index for O(1) lookups
+	pipe := s.client.Pipeline()
+	pipe.ZAdd(ctx, s.key(), redis.Z{
 		Score:  float64(msg.ScheduledAt.Unix()),
 		Member: data,
-	}).Err()
-
-	if err != nil {
-		return fmt.Errorf("zadd: %w", err)
+	})
+	pipe.HSet(ctx, s.indexKey(), msg.ID, data)
+	if _, err = pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("schedule pipeline: %w", err)
 	}
 
 	// Record metrics
@@ -149,62 +150,60 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 
 // Cancel cancels a scheduled message before delivery.
 //
-// Searches the sorted set for the message and removes it.
+// Looks up the message in the index and removes it from both the sorted set and index.
 // Returns error if the message is not found.
 func (s *RedisScheduler) Cancel(ctx context.Context, id string) error {
-	// Get all scheduled messages and find the one to cancel
-	// This is not efficient but Redis ZSET doesn't support direct member lookup by field
-	results, err := s.client.ZRange(ctx, s.key(), 0, -1).Result()
+	// Look up the member from the index
+	member, err := s.client.HGet(ctx, s.indexKey(), id).Result()
 	if err != nil {
-		return fmt.Errorf("zrange: %w", err)
+		if err == redis.Nil {
+			return fmt.Errorf("%s: %w", id, ErrNotFound)
+		}
+		return fmt.Errorf("hget index: %w", err)
 	}
 
-	for _, result := range results {
-		var msg Message
-		if err := json.Unmarshal([]byte(result), &msg); err != nil {
-			continue
-		}
-
-		if msg.ID == id {
-			if err := s.client.ZRem(ctx, s.key(), result).Err(); err != nil {
-				return fmt.Errorf("zrem: %w", err)
-			}
-
-			// Record metrics
-			if s.opts.metrics != nil {
-				s.opts.metrics.RecordCancelled(ctx, msg.EventName)
-			}
-
-			s.logger.Debug("cancelled scheduled message", "id", id)
-			return nil
-		}
+	var msg Message
+	if err := json.Unmarshal([]byte(member), &msg); err != nil {
+		return fmt.Errorf("unmarshal: %w", err)
 	}
 
-	return fmt.Errorf("%s: %w", id, ErrNotFound)
+	// Remove from sorted set and index atomically via pipeline
+	pipe := s.client.Pipeline()
+	pipe.ZRem(ctx, s.key(), member)
+	pipe.ZRem(ctx, s.processingKey(), member)
+	pipe.HDel(ctx, s.indexKey(), id)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("cancel pipeline: %w", err)
+	}
+
+	// Record metrics
+	if s.opts.metrics != nil {
+		s.opts.metrics.RecordCancelled(ctx, msg.EventName)
+	}
+
+	s.logger.Debug("cancelled scheduled message", "id", id)
+	return nil
 }
 
 // Get retrieves a scheduled message by ID.
 //
-// Searches the sorted set for the message.
+// Looks up the message in the index for O(1) retrieval.
 // Returns error if the message is not found.
 func (s *RedisScheduler) Get(ctx context.Context, id string) (*Message, error) {
-	results, err := s.client.ZRange(ctx, s.key(), 0, -1).Result()
+	member, err := s.client.HGet(ctx, s.indexKey(), id).Result()
 	if err != nil {
-		return nil, fmt.Errorf("zrange: %w", err)
+		if err == redis.Nil {
+			return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("hget index: %w", err)
 	}
 
-	for _, result := range results {
-		var msg Message
-		if err := json.Unmarshal([]byte(result), &msg); err != nil {
-			continue
-		}
-
-		if msg.ID == id {
-			return &msg, nil
-		}
+	var msg Message
+	if err := json.Unmarshal([]byte(member), &msg); err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 
-	return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
+	return &msg, nil
 }
 
 // List returns scheduled messages matching the filter.
@@ -373,6 +372,9 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
 					}
 				}
+
+				// Clean up index entry
+				s.client.HDel(ctx, s.indexKey(), msg.ID)
 				continue
 			}
 
@@ -397,16 +399,20 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 				continue
 			}
 
-			// Add back to pending with updated scheduled time
-			s.client.ZAdd(ctx, s.key(), redis.Z{
+			// Add back to pending with updated scheduled time and update index
+			retryPipe := s.client.Pipeline()
+			retryPipe.ZAdd(ctx, s.key(), redis.Z{
 				Score:  float64(msg.ScheduledAt.Unix()),
 				Member: updatedMember,
 			})
+			retryPipe.HSet(ctx, s.indexKey(), msg.ID, updatedMember)
+			retryPipe.Exec(ctx)
 			continue
 		}
 
-		// Remove from processing set after successful publish
+		// Remove from processing set and index after successful publish
 		s.client.ZRem(ctx, s.processingKey(), member)
+		s.client.HDel(ctx, s.indexKey(), msg.ID)
 
 		// Record delivery metrics
 		if s.opts.metrics != nil {
@@ -525,6 +531,11 @@ func (s *RedisScheduler) key() string {
 // processingKey returns the Redis key for messages currently being processed.
 func (s *RedisScheduler) processingKey() string {
 	return s.opts.keyPrefix + "processing"
+}
+
+// indexKey returns the Redis key for the message ID to member index hash.
+func (s *RedisScheduler) indexKey() string {
+	return s.opts.keyPrefix + "index"
 }
 
 // CountPending returns the number of pending scheduled messages.
