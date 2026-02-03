@@ -54,6 +54,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"time"
 )
@@ -237,6 +238,10 @@ type options struct {
 	// When nil, messages that exceed maxRetries are simply discarded.
 	// When set, messages are sent to the DLQ before being removed.
 	dlq DeadLetterQueue
+
+	// logger is the logger for scheduler operations.
+	// Default: slog.Default()
+	logger *slog.Logger
 }
 
 // defaultOptions returns default scheduler options.
@@ -254,6 +259,7 @@ func defaultOptions() *options {
 		keyPrefix:    "scheduler:",
 		table:        "scheduled_messages",
 		collection:   "scheduled_messages",
+		logger:       slog.Default(),
 	}
 }
 
@@ -343,6 +349,24 @@ func WithCollection(collection string) Option {
 				panic(fmt.Sprintf("scheduler: invalid collection name %q", collection))
 			}
 			o.collection = collection
+		}
+	}
+}
+
+// WithLogger sets a custom logger for the scheduler.
+//
+// The logger is used for info and error messages during scheduler operations.
+// If not set, slog.Default() is used.
+//
+// Example:
+//
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithLogger(slog.Default().With("service", "my-app")),
+//	)
+func WithLogger(l *slog.Logger) Option {
+	return func(o *options) {
+		if l != nil {
+			o.logger = l
 		}
 	}
 }

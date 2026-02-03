@@ -83,7 +83,7 @@ func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Opti
 		client:        client,
 		transport:     t,
 		opts:          o,
-		logger:        slog.Default().With("component", "scheduler.redis"),
+		logger:        o.logger.With("component", "scheduler.redis"),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
 		stuckDuration: 5 * time.Minute, // Recover stuck messages after 5 min

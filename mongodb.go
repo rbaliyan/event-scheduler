@@ -111,7 +111,7 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 		collection:    db.Collection(o.collection),
 		transport:     t,
 		opts:          o,
-		logger:        slog.Default().With("component", "scheduler.mongodb"),
+		logger:        o.logger.With("component", "scheduler.mongodb"),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
 		stuckDuration: 5 * time.Minute, // Recover messages stuck in processing after 5 min

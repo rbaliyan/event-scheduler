@@ -53,7 +53,7 @@ func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) *Po
 		transport: t,
 		opts:      o,
 		table:     o.table,
-		logger:    slog.Default().With("component", "scheduler.postgres"),
+		logger:    o.logger.With("component", "scheduler.postgres"),
 		stopCh:    make(chan struct{}),
 		stoppedCh: make(chan struct{}),
 	}
