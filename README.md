@@ -102,13 +102,11 @@ func main() {
     }
     db := client.Database("myapp")
 
-    // Create scheduler
+    // Create scheduler with custom collection name
     sched := scheduler.NewMongoScheduler(db, transport,
         scheduler.WithPollInterval(100*time.Millisecond),
+        scheduler.WithCollection("scheduled_jobs"),
     )
-
-    // Optionally customize collection name
-    sched.WithCollection("scheduled_jobs")
 
     // Create indexes for optimal performance
     if err := sched.EnsureIndexes(ctx); err != nil {
@@ -145,9 +143,10 @@ func main() {
         panic(err)
     }
 
-    // Create scheduler
+    // Create scheduler with custom table name
     sched := scheduler.NewPostgresScheduler(db, transport,
         scheduler.WithPollInterval(100*time.Millisecond),
+        scheduler.WithTable("my_scheduled_jobs"),
     )
 
     // Auto-create the table and indexes
@@ -213,8 +212,14 @@ scheduler.WithPollInterval(50 * time.Millisecond)
 // Set batch size (default: 100)
 scheduler.WithBatchSize(500)
 
-// Set key prefix for storage keys (default: "scheduler:")
+// Set key prefix for Redis storage keys (default: "scheduler:")
 scheduler.WithKeyPrefix("myapp:scheduler:")
+
+// Set table name for PostgreSQL (default: "scheduled_messages")
+scheduler.WithTable("my_scheduled_jobs")
+
+// Set collection name for MongoDB (default: "scheduled_messages")
+scheduler.WithCollection("my_scheduled_jobs")
 
 // Set retry backoff strategy
 scheduler.WithBackoff(&backoff.Exponential{

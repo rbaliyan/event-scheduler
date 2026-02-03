@@ -24,7 +24,7 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 - `Filter`: Criteria for listing scheduled messages
 - `BackoffStrategy`: Interface for retry backoff (compatible with `event/v3/backoff`)
 - `DeadLetterQueue`: Interface for DLQ storage (compatible with `event-dlq` Manager)
-- Option functions: `WithPollInterval`, `WithBatchSize`, `WithKeyPrefix`, `WithMetrics`, `WithBackoff`, `WithMaxRetries`, `WithDLQ`
+- Option functions: `WithPollInterval`, `WithBatchSize`, `WithKeyPrefix`, `WithTable`, `WithCollection`, `WithMetrics`, `WithBackoff`, `WithMaxRetries`, `WithDLQ`
 
 **Redis Scheduler (redis.go)** - Production-ready Redis implementation:
 - Uses sorted sets with scheduled time as score
@@ -35,7 +35,7 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 - Full retry/backoff/maxRetries/DLQ support
 
 **MongoDB Scheduler (mongodb.go)** - MongoDB implementation:
-- Uses `scheduled_messages` collection
+- Uses `scheduled_messages` collection (configurable via `WithCollection`)
 - `FindOneAndUpdate` for atomic claiming
 - Status field tracks pending/processing state
 - Automatic stuck message recovery
@@ -43,6 +43,7 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 - Full retry/backoff/maxRetries/DLQ support
 
 **PostgreSQL Scheduler (postgres.go)** - PostgreSQL implementation:
+- Uses `scheduled_messages` table (configurable via `WithTable`)
 - Uses `FOR UPDATE SKIP LOCKED` for concurrent safety
 - Transactional batch processing
 - JSONB metadata storage
@@ -125,7 +126,9 @@ If scheduler crashes after step 1, the `recoverStuck()` function moves messages 
 
 - Poll Interval: 100ms
 - Batch Size: 100
-- Key Prefix: "scheduler:"
+- Key Prefix: "scheduler:" (Redis)
+- Table: "scheduled_messages" (PostgreSQL)
+- Collection: "scheduled_messages" (MongoDB)
 - Stuck Duration: 5 minutes
 - Max Retries: 0 (infinite)
 - Backoff: nil (immediate retry)
@@ -141,7 +144,7 @@ The scheduler publishes messages using the `transport.Transport` interface from 
 
 ### Storage Schemas
 
-**MongoDB Collection: `scheduled_messages`**
+**MongoDB Collection** (default: `scheduled_messages`, configurable via `WithCollection`)
 ```
 {
     "_id": string,
@@ -156,7 +159,7 @@ The scheduler publishes messages using the `transport.Transport` interface from 
 }
 ```
 
-**PostgreSQL Table: `scheduled_messages`**
+**PostgreSQL Table** (default: `scheduled_messages`, configurable via `WithTable`)
 ```sql
 CREATE TABLE scheduled_messages (
     id           VARCHAR(36) PRIMARY KEY,

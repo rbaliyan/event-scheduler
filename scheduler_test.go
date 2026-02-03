@@ -23,6 +23,12 @@ func TestDefaultOptions(t *testing.T) {
 	if o.keyPrefix != "scheduler:" {
 		t.Errorf("expected keyPrefix 'scheduler:', got %q", o.keyPrefix)
 	}
+	if o.table != "scheduled_messages" {
+		t.Errorf("expected table 'scheduled_messages', got %q", o.table)
+	}
+	if o.collection != "scheduled_messages" {
+		t.Errorf("expected collection 'scheduled_messages', got %q", o.collection)
+	}
 	if o.metrics != nil {
 		t.Error("expected nil metrics by default")
 	}
@@ -98,6 +104,44 @@ func TestWithKeyPrefix_IgnoresEmpty(t *testing.T) {
 	WithKeyPrefix("")(o)
 	if o.keyPrefix != original {
 		t.Errorf("expected keyPrefix unchanged at %q, got %q", original, o.keyPrefix)
+	}
+}
+
+func TestWithTable(t *testing.T) {
+	o := defaultOptions()
+	WithTable("my_jobs")(o)
+
+	if o.table != "my_jobs" {
+		t.Errorf("expected table 'my_jobs', got %q", o.table)
+	}
+}
+
+func TestWithTable_IgnoresEmpty(t *testing.T) {
+	o := defaultOptions()
+	original := o.table
+
+	WithTable("")(o)
+	if o.table != original {
+		t.Errorf("expected table unchanged at %q, got %q", original, o.table)
+	}
+}
+
+func TestWithCollection(t *testing.T) {
+	o := defaultOptions()
+	WithCollection("my_jobs")(o)
+
+	if o.collection != "my_jobs" {
+		t.Errorf("expected collection 'my_jobs', got %q", o.collection)
+	}
+}
+
+func TestWithCollection_IgnoresEmpty(t *testing.T) {
+	o := defaultOptions()
+	original := o.collection
+
+	WithCollection("")(o)
+	if o.collection != original {
+		t.Errorf("expected collection unchanged at %q, got %q", original, o.collection)
 	}
 }
 

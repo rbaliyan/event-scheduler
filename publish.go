@@ -19,12 +19,18 @@ func publishScheduledMessage(ctx context.Context, t transport.Transport, msg *Me
 	metadata["scheduled_message_id"] = msg.ID
 	metadata["scheduled_at"] = msg.ScheduledAt.Format(time.RFC3339)
 
+	// Propagate trace context from the current span
+	var opts []message.Option
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		opts = append(opts, message.WithSpanContext(sc))
+	}
+
 	transportMsg := message.New(
 		msg.ID,
 		"scheduler",
 		msg.Payload,
 		metadata,
-		trace.SpanContext{},
+		opts...,
 	)
 
 	return t.Publish(ctx, msg.EventName, transportMsg)

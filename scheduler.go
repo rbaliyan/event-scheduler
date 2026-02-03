@@ -200,9 +200,17 @@ type options struct {
 	// Default: 100
 	batchSize int
 
-	// keyPrefix is the prefix for storage keys.
+	// keyPrefix is the prefix for storage keys (Redis).
 	// Default: "scheduler:"
 	keyPrefix string
+
+	// table is the table name for SQL backends (PostgreSQL).
+	// Default: "scheduled_messages"
+	table string
+
+	// collection is the collection name for MongoDB.
+	// Default: "scheduled_messages"
+	collection string
 
 	// metrics is the optional metrics instance for recording scheduler metrics.
 	// When nil, no metrics are recorded.
@@ -232,11 +240,15 @@ type options struct {
 //   - pollInterval: 100ms
 //   - batchSize: 100
 //   - keyPrefix: "scheduler:"
+//   - table: "scheduled_messages"
+//   - collection: "scheduled_messages"
 func defaultOptions() *options {
 	return &options{
 		pollInterval: 100 * time.Millisecond,
 		batchSize:    100,
 		keyPrefix:    "scheduler:",
+		table:        "scheduled_messages",
+		collection:   "scheduled_messages",
 	}
 }
 
@@ -279,7 +291,7 @@ func WithBatchSize(size int) Option {
 	}
 }
 
-// WithKeyPrefix sets the prefix for storage keys.
+// WithKeyPrefix sets the prefix for storage keys (Redis only).
 //
 // Use for multi-tenant deployments or to organize keys by application.
 //
@@ -290,6 +302,36 @@ func WithKeyPrefix(prefix string) Option {
 	return func(o *options) {
 		if prefix != "" {
 			o.keyPrefix = prefix
+		}
+	}
+}
+
+// WithTable sets the table name for SQL backends (PostgreSQL).
+//
+// Use for multi-tenant deployments or custom table naming conventions.
+//
+// Example:
+//
+//	scheduler := NewPostgresScheduler(db, transport, WithTable("my_scheduled_jobs"))
+func WithTable(table string) Option {
+	return func(o *options) {
+		if table != "" {
+			o.table = table
+		}
+	}
+}
+
+// WithCollection sets the collection name for MongoDB.
+//
+// Use for multi-tenant deployments or custom collection naming conventions.
+//
+// Example:
+//
+//	scheduler := NewMongoScheduler(db, transport, WithCollection("my_scheduled_jobs"))
+func WithCollection(collection string) Option {
+	return func(o *options) {
+		if collection != "" {
+			o.collection = collection
 		}
 	}
 }

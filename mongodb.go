@@ -108,7 +108,7 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 	}
 
 	return &MongoScheduler{
-		collection:    db.Collection("scheduled_messages"),
+		collection:    db.Collection(o.collection),
 		transport:     t,
 		opts:          o,
 		logger:        slog.Default().With("component", "scheduler.mongodb"),
