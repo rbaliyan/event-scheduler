@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	mongoopts "go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*MongoScheduler, func()) {
@@ -21,7 +21,7 @@ func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Mong
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	client, err := mongo.Connect(ctx, mongoopts.Client().
+	client, err := mongo.Connect(mongoopts.Client().
 		ApplyURI(getMongoURI()).
 		SetServerSelectionTimeout(2*time.Second).
 		SetConnectTimeout(2*time.Second))
