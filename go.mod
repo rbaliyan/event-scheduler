@@ -5,15 +5,13 @@ go 1.24.0
 require (
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
-	github.com/rbaliyan/event/v3 v3.6.14
+	github.com/rbaliyan/event/v3 v3.7.0
 	github.com/redis/go-redis/v9 v9.17.2
 	go.mongodb.org/mongo-driver/v2 v2.2.0
 	go.opentelemetry.io/otel v1.39.0
 	go.opentelemetry.io/otel/metric v1.39.0
 	go.opentelemetry.io/otel/trace v1.39.0
 )
-
-replace github.com/rbaliyan/event/v3 => ../event
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
