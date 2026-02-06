@@ -359,7 +359,9 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 
 	// Reset backoff state at the start of each processing cycle
 	if s.opts.backoff != nil {
-		s.opts.backoff.Reset()
+		if r, ok := s.opts.backoff.(Resetter); ok {
+			r.Reset()
+		}
 	}
 
 	for i := 0; i < s.opts.batchSize; i++ {
@@ -628,5 +630,63 @@ func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
 	})
 }
 
-// Compile-time check
-var _ Scheduler = (*MongoScheduler)(nil)
+// Health performs a health check on the MongoDB scheduler.
+//
+// The health check:
+//   - Pings MongoDB to verify connectivity
+//   - Counts pending messages
+//   - Counts stuck messages (if any)
+//
+// Returns HealthStatusHealthy if MongoDB is responsive and no stuck messages.
+// Returns HealthStatusDegraded if stuck messages exist.
+// Returns HealthStatusUnhealthy if MongoDB is not responsive.
+func (s *MongoScheduler) Health(ctx context.Context) *HealthCheckResult {
+	start := time.Now()
+	result := &HealthCheckResult{
+		Status:    HealthStatusHealthy,
+		CheckedAt: start,
+		Details:   make(map[string]any),
+	}
+
+	// Ping MongoDB
+	if err := s.collection.Database().Client().Ping(ctx, nil); err != nil {
+		result.Status = HealthStatusUnhealthy
+		result.Message = fmt.Sprintf("mongodb ping failed: %v", err)
+		result.Latency = time.Since(start)
+		return result
+	}
+
+	// Count pending messages
+	pending, err := s.CountPending(ctx)
+	if err != nil {
+		result.Status = HealthStatusDegraded
+		result.Message = fmt.Sprintf("failed to count pending: %v", err)
+	}
+	result.PendingMessages = pending
+
+	// Count stuck messages
+	stuck, err := s.CountStuck(ctx)
+	if err != nil {
+		result.Status = HealthStatusDegraded
+		result.Message = fmt.Sprintf("failed to count stuck: %v", err)
+	}
+	result.StuckMessages = stuck
+
+	// Degraded if stuck messages exist
+	if stuck > 0 && result.Status == HealthStatusHealthy {
+		result.Status = HealthStatusDegraded
+		result.Message = fmt.Sprintf("%d messages stuck in processing", stuck)
+	}
+
+	result.Latency = time.Since(start)
+	result.Details["collection"] = s.collection.Name()
+	result.Details["database"] = s.collection.Database().Name()
+
+	return result
+}
+
+// Compile-time checks
+var (
+	_ Scheduler     = (*MongoScheduler)(nil)
+	_ HealthChecker = (*MongoScheduler)(nil)
+)

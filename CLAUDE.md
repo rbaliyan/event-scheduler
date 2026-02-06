@@ -122,6 +122,35 @@ If scheduler crashes after step 1, the `recoverStuck()` function moves messages 
 - **Graceful Shutdown**: Stop channel signals polling loop to exit; in-flight processing completes
 - **Atomic Operations**: Lua scripts (Redis) / FindOneAndUpdate (MongoDB) / FOR UPDATE SKIP LOCKED (PostgreSQL)
 
+### Health Check
+
+All scheduler implementations implement the `HealthChecker` interface for monitoring and readiness probes:
+
+```go
+type HealthChecker interface {
+    Health(ctx context.Context) *HealthCheckResult
+}
+
+type HealthCheckResult struct {
+    Status          HealthStatus   // healthy, degraded, unhealthy
+    Message         string
+    Latency         time.Duration
+    PendingMessages int64
+    StuckMessages   int64
+    Details         map[string]any
+    CheckedAt       time.Time
+}
+```
+
+The health check verifies:
+- Database connectivity (Redis ping, MongoDB ping, PostgreSQL ping)
+- Pending message count
+- Stuck message count (Redis/MongoDB only)
+
+Returns `HealthStatusHealthy` if database is responsive and no stuck messages.
+Returns `HealthStatusDegraded` if stuck messages exist.
+Returns `HealthStatusUnhealthy` if database is not responsive.
+
 ### Default Configuration
 
 - Poll Interval: 100ms

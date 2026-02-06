@@ -297,7 +297,9 @@ func (s *PostgresScheduler) Stop(ctx context.Context) error {
 func (s *PostgresScheduler) processDue(ctx context.Context) {
 	// Reset backoff state at the start of each processing cycle
 	if s.opts.backoff != nil {
-		s.opts.backoff.Reset()
+		if r, ok := s.opts.backoff.(Resetter); ok {
+			r.Reset()
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -536,5 +538,52 @@ func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
 	})
 }
 
-// Compile-time check
-var _ Scheduler = (*PostgresScheduler)(nil)
+// Health performs a health check on the PostgreSQL scheduler.
+//
+// The health check:
+//   - Pings PostgreSQL to verify connectivity
+//   - Counts pending messages
+//
+// Note: PostgreSQL scheduler uses FOR UPDATE SKIP LOCKED, so there's no
+// separate "stuck" state. Messages are atomically locked within transactions.
+//
+// Returns HealthStatusHealthy if PostgreSQL is responsive.
+// Returns HealthStatusUnhealthy if PostgreSQL is not responsive.
+func (s *PostgresScheduler) Health(ctx context.Context) *HealthCheckResult {
+	start := time.Now()
+	result := &HealthCheckResult{
+		Status:    HealthStatusHealthy,
+		CheckedAt: start,
+		Details:   make(map[string]any),
+	}
+
+	// Ping PostgreSQL
+	if err := s.db.PingContext(ctx); err != nil {
+		result.Status = HealthStatusUnhealthy
+		result.Message = fmt.Sprintf("postgres ping failed: %v", err)
+		result.Latency = time.Since(start)
+		return result
+	}
+
+	// Count pending messages
+	pending, err := s.CountPending(ctx)
+	if err != nil {
+		result.Status = HealthStatusDegraded
+		result.Message = fmt.Sprintf("failed to count pending: %v", err)
+	}
+	result.PendingMessages = pending
+
+	// PostgreSQL uses FOR UPDATE SKIP LOCKED, so no stuck messages
+	result.StuckMessages = 0
+
+	result.Latency = time.Since(start)
+	result.Details["table"] = s.table
+
+	return result
+}
+
+// Compile-time checks
+var (
+	_ Scheduler     = (*PostgresScheduler)(nil)
+	_ HealthChecker = (*PostgresScheduler)(nil)
+)

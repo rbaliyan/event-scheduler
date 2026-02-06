@@ -57,6 +57,8 @@ import (
 	"log/slog"
 	"regexp"
 	"time"
+
+	"github.com/rbaliyan/event/v3/backoff"
 )
 
 // validIdentifier matches safe SQL/collection identifiers (alphanumeric and underscores).
@@ -136,6 +138,42 @@ type Scheduler interface {
 	Stop(ctx context.Context) error
 }
 
+// HealthStatus represents the health state of the scheduler.
+type HealthStatus string
+
+const (
+	// HealthStatusHealthy indicates the scheduler is functioning normally.
+	HealthStatusHealthy HealthStatus = "healthy"
+	// HealthStatusDegraded indicates the scheduler is functioning but with issues.
+	HealthStatusDegraded HealthStatus = "degraded"
+	// HealthStatusUnhealthy indicates the scheduler is not functioning.
+	HealthStatusUnhealthy HealthStatus = "unhealthy"
+)
+
+// HealthCheckResult contains detailed health information about the scheduler.
+type HealthCheckResult struct {
+	Status          HealthStatus   `json:"status"`
+	Message         string         `json:"message,omitempty"`
+	Latency         time.Duration  `json:"latency,omitempty"`
+	PendingMessages int64          `json:"pending_messages"`
+	StuckMessages   int64          `json:"stuck_messages,omitempty"`
+	Details         map[string]any `json:"details,omitempty"`
+	CheckedAt       time.Time      `json:"checked_at"`
+}
+
+// IsHealthy returns true if the status is healthy.
+func (h *HealthCheckResult) IsHealthy() bool {
+	return h.Status == HealthStatusHealthy
+}
+
+// HealthChecker is an optional interface that schedulers can implement
+// to provide health check capabilities for monitoring and readiness probes.
+type HealthChecker interface {
+	// Health performs a health check and returns the result.
+	// The context can be used to set a timeout for the health check.
+	Health(ctx context.Context) *HealthCheckResult
+}
+
 // Filter specifies criteria for listing scheduled messages.
 //
 // All fields are optional. Empty filter returns all messages.
@@ -162,18 +200,20 @@ type Filter struct {
 	Limit int
 }
 
-// BackoffStrategy defines a backoff strategy for retry logic.
-// This interface matches backoff.Strategy from the main event library
-// (github.com/rbaliyan/event/v3/backoff) for loose coupling. Implementations
-// from that package can be used directly without importing this package.
+// BackoffStrategy is an alias for backoff.Strategy from the main event library.
+// All implementations from github.com/rbaliyan/event/v3/backoff can be used directly.
 //
 // Implementations must be safe for concurrent use.
-type BackoffStrategy interface {
-	// NextDelay returns the delay for the given attempt (0-indexed).
-	// Attempt 0 is the first retry, not the initial attempt.
-	NextDelay(attempt int) time.Duration
+type BackoffStrategy = backoff.Strategy
 
-	// Reset resets the strategy state if any.
+// Resetter is an optional interface for backoff strategies that maintain state.
+// If a BackoffStrategy also implements Resetter, Reset() will be called at the
+// start of each processing cycle to clear any accumulated state.
+//
+// Note: The standard backoff implementations (Constant, Linear, Exponential) are
+// stateless and do not need to implement this interface.
+type Resetter interface {
+	// Reset resets the strategy state.
 	Reset()
 }
 
