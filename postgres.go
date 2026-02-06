@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	eventerrors "github.com/rbaliyan/event/v3/errors"
+	"github.com/rbaliyan/event/v3/health"
 	"github.com/rbaliyan/event/v3/transport"
 )
 
@@ -593,37 +594,39 @@ func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
 //
 // Returns HealthStatusHealthy if PostgreSQL is responsive.
 // Returns HealthStatusUnhealthy if PostgreSQL is not responsive.
-func (s *PostgresScheduler) Health(ctx context.Context) *HealthCheckResult {
+func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
-	result := &HealthCheckResult{
-		Status:    HealthStatusHealthy,
-		CheckedAt: start,
-		Details:   make(map[string]any),
-	}
 
 	// Ping PostgreSQL
 	if err := s.db.PingContext(ctx); err != nil {
-		result.Status = HealthStatusUnhealthy
-		result.Message = fmt.Sprintf("postgres ping failed: %v", err)
-		result.Latency = time.Since(start)
-		return result
+		return &health.Result{
+			Status:    HealthStatusUnhealthy,
+			Message:   fmt.Sprintf("postgres ping failed: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
 	}
 
 	// Count pending messages
 	pending, err := s.CountPending(ctx)
+	message := ""
+	status := HealthStatusHealthy
 	if err != nil {
-		result.Status = HealthStatusDegraded
-		result.Message = fmt.Sprintf("failed to count pending: %v", err)
+		status = HealthStatusDegraded
+		message = fmt.Sprintf("failed to count pending: %v", err)
 	}
-	result.PendingMessages = pending
 
-	// PostgreSQL uses FOR UPDATE SKIP LOCKED, so no stuck messages
-	result.StuckMessages = 0
-
-	result.Latency = time.Since(start)
-	result.Details["table"] = s.table
-
-	return result
+	return &health.Result{
+		Status:    status,
+		Message:   message,
+		Latency:   time.Since(start),
+		CheckedAt: start,
+		Details: map[string]any{
+			"pending_messages": pending,
+			"stuck_messages":   int64(0), // PostgreSQL uses FOR UPDATE SKIP LOCKED
+			"table":            s.table,
+		},
+	}
 }
 
 // Compile-time checks

@@ -153,47 +153,55 @@ const (
 	HealthStatusUnhealthy = health.StatusUnhealthy
 )
 
-// HealthCheckResult contains detailed health information about the scheduler.
+// HealthCheckResult is an alias for the shared health.Result type.
+// Scheduler-specific fields are stored in the Details map:
+//   - pending_messages: number of pending scheduled messages
+//   - stuck_messages: number of messages stuck in processing
 //
-// This extends the shared health.Result with scheduler-specific fields.
-type HealthCheckResult struct {
-	Status          HealthStatus   `json:"status"`
-	Message         string         `json:"message,omitempty"`
-	Latency         time.Duration  `json:"latency,omitempty"`
-	PendingMessages int64          `json:"pending_messages"`
-	StuckMessages   int64          `json:"stuck_messages,omitempty"`
-	Details         map[string]any `json:"details,omitempty"`
-	CheckedAt       time.Time      `json:"checked_at"`
-}
-
-// IsHealthy returns true if the status is healthy.
-func (h *HealthCheckResult) IsHealthy() bool {
-	return h.Status == HealthStatusHealthy
-}
-
-// ToResult converts HealthCheckResult to the shared health.Result type.
-func (h *HealthCheckResult) ToResult() *health.Result {
-	details := h.Details
-	if details == nil {
-		details = make(map[string]any)
-	}
-	details["pending_messages"] = h.PendingMessages
-	details["stuck_messages"] = h.StuckMessages
-	return &health.Result{
-		Status:    h.Status,
-		Message:   h.Message,
-		Latency:   h.Latency,
-		CheckedAt: h.CheckedAt,
-		Details:   details,
-	}
-}
+// Deprecated: Use health.Result directly for new code.
+type HealthCheckResult = health.Result
 
 // HealthChecker is an optional interface that schedulers can implement
 // to provide health check capabilities for monitoring and readiness probes.
-type HealthChecker interface {
-	// Health performs a health check and returns the result.
-	// The context can be used to set a timeout for the health check.
-	Health(ctx context.Context) *HealthCheckResult
+//
+// This interface uses the shared health.Checker signature for ecosystem consistency.
+type HealthChecker = health.Checker
+
+// NewHealthResult creates a health result with scheduler-specific details.
+// This is a helper for creating health results with pending/stuck message counts.
+func NewHealthResult(status HealthStatus, message string, latency time.Duration, pending, stuck int64) *health.Result {
+	return &health.Result{
+		Status:    status,
+		Message:   message,
+		Latency:   latency,
+		CheckedAt: time.Now(),
+		Details: map[string]any{
+			"pending_messages": pending,
+			"stuck_messages":   stuck,
+		},
+	}
+}
+
+// HealthPendingMessages extracts the pending message count from a health result.
+func HealthPendingMessages(r *health.Result) int64 {
+	if r == nil || r.Details == nil {
+		return 0
+	}
+	if v, ok := r.Details["pending_messages"].(int64); ok {
+		return v
+	}
+	return 0
+}
+
+// HealthStuckMessages extracts the stuck message count from a health result.
+func HealthStuckMessages(r *health.Result) int64 {
+	if r == nil || r.Details == nil {
+		return 0
+	}
+	if v, ok := r.Details["stuck_messages"].(int64); ok {
+		return v
+	}
+	return 0
 }
 
 // Filter specifies criteria for listing scheduled messages.

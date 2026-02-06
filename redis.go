@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	eventerrors "github.com/rbaliyan/event/v3/errors"
+	"github.com/rbaliyan/event/v3/health"
 	"github.com/rbaliyan/event/v3/transport"
 	"github.com/redis/go-redis/v9"
 )
@@ -649,48 +650,53 @@ func (s *RedisScheduler) SetupMetricsCallbacks(ctx context.Context) {
 // Returns HealthStatusHealthy if Redis is responsive and no stuck messages.
 // Returns HealthStatusDegraded if stuck messages exist.
 // Returns HealthStatusUnhealthy if Redis is not responsive.
-func (s *RedisScheduler) Health(ctx context.Context) *HealthCheckResult {
+func (s *RedisScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
-	result := &HealthCheckResult{
-		Status:    HealthStatusHealthy,
-		CheckedAt: start,
-		Details:   make(map[string]any),
-	}
 
 	// Ping Redis
 	if err := s.client.Ping(ctx).Err(); err != nil {
-		result.Status = HealthStatusUnhealthy
-		result.Message = fmt.Sprintf("redis ping failed: %v", err)
-		result.Latency = time.Since(start)
-		return result
+		return &health.Result{
+			Status:    HealthStatusUnhealthy,
+			Message:   fmt.Sprintf("redis ping failed: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
 	}
+
+	status := HealthStatusHealthy
+	var message string
 
 	// Count pending messages
 	pending, err := s.CountPending(ctx)
 	if err != nil {
-		result.Status = HealthStatusDegraded
-		result.Message = fmt.Sprintf("failed to count pending: %v", err)
+		status = HealthStatusDegraded
+		message = fmt.Sprintf("failed to count pending: %v", err)
 	}
-	result.PendingMessages = pending
 
 	// Count stuck messages
 	stuck, err := s.CountStuck(ctx)
 	if err != nil {
-		result.Status = HealthStatusDegraded
-		result.Message = fmt.Sprintf("failed to count stuck: %v", err)
+		status = HealthStatusDegraded
+		message = fmt.Sprintf("failed to count stuck: %v", err)
 	}
-	result.StuckMessages = stuck
 
 	// Degraded if stuck messages exist
-	if stuck > 0 && result.Status == HealthStatusHealthy {
-		result.Status = HealthStatusDegraded
-		result.Message = fmt.Sprintf("%d messages stuck in processing", stuck)
+	if stuck > 0 && status == HealthStatusHealthy {
+		status = HealthStatusDegraded
+		message = fmt.Sprintf("%d messages stuck in processing", stuck)
 	}
 
-	result.Latency = time.Since(start)
-	result.Details["key_prefix"] = s.opts.keyPrefix
-
-	return result
+	return &health.Result{
+		Status:    status,
+		Message:   message,
+		Latency:   time.Since(start),
+		CheckedAt: start,
+		Details: map[string]any{
+			"pending_messages": pending,
+			"stuck_messages":   stuck,
+			"key_prefix":       s.opts.keyPrefix,
+		},
+	}
 }
 
 // Compile-time checks
