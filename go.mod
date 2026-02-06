@@ -2,8 +2,6 @@ module github.com/rbaliyan/event-scheduler
 
 go 1.24.0
 
-replace github.com/rbaliyan/event/v3 => ../event
-
 require (
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
