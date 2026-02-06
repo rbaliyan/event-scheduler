@@ -298,7 +298,7 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 	if err != nil {
 		return nil, fmt.Errorf("find: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var messages []*Message
 	for cursor.Next(ctx) {

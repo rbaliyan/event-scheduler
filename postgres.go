@@ -236,7 +236,7 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var messages []*Message
 	for rows.Next() {
@@ -366,7 +366,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 		s.logger.Error("failed to query due messages", "error", err)
 		return 0
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var toDelete []string
 	var toDiscard []string // exceeded maxRetries

@@ -30,20 +30,20 @@ type Metrics struct {
 	meter metric.Meter
 
 	// Counters
-	scheduledTotal  metric.Int64Counter
-	deliveredTotal  metric.Int64Counter
-	failedTotal     metric.Int64Counter
-	cancelledTotal  metric.Int64Counter
-	recoveredTotal  metric.Int64Counter
-	dlqSentTotal    metric.Int64Counter
+	scheduledTotal metric.Int64Counter
+	deliveredTotal metric.Int64Counter
+	failedTotal    metric.Int64Counter
+	cancelledTotal metric.Int64Counter
+	recoveredTotal metric.Int64Counter
+	dlqSentTotal   metric.Int64Counter
 
 	// Gauges (using UpDownCounter for gauge-like behavior)
 	pendingMessages metric.Int64ObservableGauge
 	stuckMessages   metric.Int64ObservableGauge
 
 	// Histograms
-	deliveryDelay       metric.Float64Histogram
-	processingDuration  metric.Float64Histogram
+	deliveryDelay      metric.Float64Histogram
+	processingDuration metric.Float64Histogram
 
 	// Callbacks for observable gauges
 	pendingCallback func() int64

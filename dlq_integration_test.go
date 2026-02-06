@@ -198,4 +198,3 @@ func (s *inMemorySchedulerWithDLQ) processDue(ctx context.Context) {
 		delete(s.messages, id)
 	}
 }
-

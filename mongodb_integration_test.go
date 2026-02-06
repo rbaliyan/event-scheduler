@@ -23,8 +23,8 @@ func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Mong
 
 	client, err := mongo.Connect(mongoopts.Client().
 		ApplyURI(getMongoURI()).
-		SetServerSelectionTimeout(2*time.Second).
-		SetConnectTimeout(2*time.Second))
+		SetServerSelectionTimeout(2 * time.Second).
+		SetConnectTimeout(2 * time.Second))
 	if err != nil {
 		t.Skipf("MongoDB not available: %v", err)
 	}
