@@ -452,7 +452,9 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 				}
 
 				// Delete the message
-				s.deleteClaimed(ctx, msg.ID)
+				if err := s.deleteClaimed(ctx, msg.ID); err != nil {
+					s.logger.Error("failed to delete claimed message", "id", msg.ID, "error", err)
+				}
 				continue
 			}
 

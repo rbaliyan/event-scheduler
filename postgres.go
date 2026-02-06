@@ -349,7 +349,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 		s.logger.Error("failed to begin transaction", "error", err)
 		return 0
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Lock and fetch due messages
 	query := fmt.Sprintf(`

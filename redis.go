@@ -446,7 +446,9 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 				Member: updatedMember,
 			})
 			retryPipe.HSet(ctx, s.indexKey(), msg.ID, updatedMember)
-			retryPipe.Exec(ctx)
+			if _, err := retryPipe.Exec(ctx); err != nil {
+				s.logger.Error("failed to execute retry pipeline", "id", msg.ID, "error", err)
+			}
 			continue
 		}
 

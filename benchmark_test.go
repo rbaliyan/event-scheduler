@@ -4,34 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/rbaliyan/event/v3/transport"
 )
 
-// mockBenchTransport is a minimal transport for benchmarks
-type mockBenchTransport struct{}
-
-func (m *mockBenchTransport) Publish(ctx context.Context, name string, msg transport.Message) error {
-	return nil
-}
-
-func (m *mockBenchTransport) Subscribe(ctx context.Context, name string, opts ...transport.SubscribeOption) (transport.Subscription, error) {
-	return nil, nil
-}
-
-func (m *mockBenchTransport) RegisterEvent(ctx context.Context, name string) error {
-	return nil
-}
-
-func (m *mockBenchTransport) UnregisterEvent(ctx context.Context, name string) error {
-	return nil
-}
-
-func (m *mockBenchTransport) Close(ctx context.Context) error {
-	return nil
-}
-
-// mockBenchScheduler wraps a mock store for benchmarking
+// mockBenchStore wraps a mock store for benchmarking
 type mockBenchStore struct {
 	messages map[string]*Message
 }
