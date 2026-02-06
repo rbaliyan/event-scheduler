@@ -1,5 +1,9 @@
 # Event Scheduler
 
+[![CI](https://github.com/rbaliyan/event-scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/rbaliyan/event-scheduler/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/rbaliyan/event-scheduler.svg)](https://pkg.go.dev/github.com/rbaliyan/event-scheduler)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rbaliyan/event-scheduler)](https://goreportcard.com/report/github.com/rbaliyan/event-scheduler)
+
 A production-grade delayed and scheduled message delivery library for Go. Schedule messages for future delivery with support for Redis, PostgreSQL, and MongoDB backends.
 
 ## Features
