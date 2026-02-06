@@ -222,6 +222,68 @@ type Filter struct {
 	Limit int
 }
 
+// FilterBuilder provides a fluent API for constructing Filter queries.
+//
+// Example:
+//
+//	filter := scheduler.NewFilterBuilder().
+//	    ForEvent("orders.reminder").
+//	    Before(time.Now().Add(time.Hour)).
+//	    After(time.Now()).
+//	    WithLimit(100).
+//	    Build()
+type FilterBuilder struct {
+	filter Filter
+}
+
+// NewFilterBuilder creates a new filter builder.
+func NewFilterBuilder() *FilterBuilder {
+	return &FilterBuilder{}
+}
+
+// ForEvent filters by event name.
+func (b *FilterBuilder) ForEvent(name string) *FilterBuilder {
+	b.filter.EventName = name
+	return b
+}
+
+// Before filters messages scheduled before the given time.
+func (b *FilterBuilder) Before(t time.Time) *FilterBuilder {
+	b.filter.Before = t
+	return b
+}
+
+// After filters messages scheduled after the given time.
+func (b *FilterBuilder) After(t time.Time) *FilterBuilder {
+	b.filter.After = t
+	return b
+}
+
+// InTimeRange filters messages scheduled between start and end times.
+func (b *FilterBuilder) InTimeRange(start, end time.Time) *FilterBuilder {
+	b.filter.After = start
+	b.filter.Before = end
+	return b
+}
+
+// DueWithin filters messages scheduled within the given duration from now.
+func (b *FilterBuilder) DueWithin(d time.Duration) *FilterBuilder {
+	b.filter.After = time.Now()
+	b.filter.Before = time.Now().Add(d)
+	return b
+}
+
+// WithLimit sets the maximum number of results.
+func (b *FilterBuilder) WithLimit(limit int) *FilterBuilder {
+	b.filter.Limit = limit
+	return b
+}
+
+// Build returns the constructed filter.
+func (b *FilterBuilder) Build() Filter {
+	return b.filter
+}
+
 // BackoffStrategy is an alias for backoff.Strategy from the main event library.
 // All implementations from github.com/rbaliyan/event/v3/backoff can be used directly.
 //
