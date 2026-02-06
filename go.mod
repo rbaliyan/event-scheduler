@@ -4,7 +4,7 @@ go 1.24.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/lib/pq v1.10.9
+	github.com/lib/pq v1.11.1
 	github.com/rbaliyan/event/v3 v3.7.9
 	github.com/redis/go-redis/v9 v9.17.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
