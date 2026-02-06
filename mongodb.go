@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/transport"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -100,8 +101,18 @@ type MongoScheduler struct {
 	stuckDuration time.Duration // How long before a processing message is considered stuck
 }
 
-// NewMongoScheduler creates a new MongoDB-based scheduler
+// NewMongoScheduler creates a new MongoDB-based scheduler.
+//
+// Parameters:
+//   - db: required - MongoDB database connection (must not be nil)
+//   - t: required - transport for publishing messages (must not be nil)
+//   - opts: optional configuration options
+//
+// Panics if db or t is nil (programming error).
 func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option) *MongoScheduler {
+	eventerrors.RequireNotNil(db, "db")
+	eventerrors.RequireNotNil(t, "transport")
+
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)

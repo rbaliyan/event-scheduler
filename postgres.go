@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/transport"
 )
 
@@ -41,8 +42,18 @@ type PostgresScheduler struct {
 	stopOnce  sync.Once
 }
 
-// NewPostgresScheduler creates a new PostgreSQL-based scheduler
+// NewPostgresScheduler creates a new PostgreSQL-based scheduler.
+//
+// Parameters:
+//   - db: required - PostgreSQL database connection (must not be nil)
+//   - t: required - transport for publishing messages (must not be nil)
+//   - opts: optional configuration options
+//
+// Panics if db or t is nil (programming error).
 func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) *PostgresScheduler {
+	eventerrors.RequireNotNil(db, "db")
+	eventerrors.RequireNotNil(t, "transport")
+
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)

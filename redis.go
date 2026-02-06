@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/transport"
 	"github.com/redis/go-redis/v9"
 )
@@ -69,11 +70,16 @@ type RedisScheduler struct {
 //   - t: Transport for publishing due messages
 //   - opts: Optional configuration options
 //
+// Panics if client or t is nil (programming error).
+//
 // Example:
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 //	scheduler := scheduler.NewRedisScheduler(rdb, transport)
 func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Option) *RedisScheduler {
+	eventerrors.RequireNotNil(client, "client")
+	eventerrors.RequireNotNil(t, "transport")
+
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)
