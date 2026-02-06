@@ -3,6 +3,9 @@
 [![CI](https://github.com/rbaliyan/event-scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/rbaliyan/event-scheduler/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rbaliyan/event-scheduler.svg)](https://pkg.go.dev/github.com/rbaliyan/event-scheduler)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rbaliyan/event-scheduler)](https://goreportcard.com/report/github.com/rbaliyan/event-scheduler)
+[![Release](https://img.shields.io/github/v/release/rbaliyan/event-scheduler)](https://github.com/rbaliyan/event-scheduler/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/rbaliyan/event-scheduler/badge)](https://scorecard.dev/viewer/?uri=github.com/rbaliyan/event-scheduler)
 
 A production-grade delayed and scheduled message delivery library for Go. Schedule messages for future delivery with support for Redis, PostgreSQL, and MongoDB backends.
 
