@@ -59,6 +59,7 @@ import (
 	"time"
 
 	"github.com/rbaliyan/event/v3/backoff"
+	"github.com/rbaliyan/event/v3/health"
 )
 
 // validIdentifier matches safe SQL/collection identifiers (alphanumeric and underscores).
@@ -139,18 +140,22 @@ type Scheduler interface {
 }
 
 // HealthStatus represents the health state of the scheduler.
-type HealthStatus string
+// This is an alias to the shared health package type for ecosystem consistency.
+type HealthStatus = health.Status
 
+// Health status constants - these alias the shared health package constants.
 const (
 	// HealthStatusHealthy indicates the scheduler is functioning normally.
-	HealthStatusHealthy HealthStatus = "healthy"
+	HealthStatusHealthy = health.StatusHealthy
 	// HealthStatusDegraded indicates the scheduler is functioning but with issues.
-	HealthStatusDegraded HealthStatus = "degraded"
+	HealthStatusDegraded = health.StatusDegraded
 	// HealthStatusUnhealthy indicates the scheduler is not functioning.
-	HealthStatusUnhealthy HealthStatus = "unhealthy"
+	HealthStatusUnhealthy = health.StatusUnhealthy
 )
 
 // HealthCheckResult contains detailed health information about the scheduler.
+//
+// This extends the shared health.Result with scheduler-specific fields.
 type HealthCheckResult struct {
 	Status          HealthStatus   `json:"status"`
 	Message         string         `json:"message,omitempty"`
@@ -164,6 +169,23 @@ type HealthCheckResult struct {
 // IsHealthy returns true if the status is healthy.
 func (h *HealthCheckResult) IsHealthy() bool {
 	return h.Status == HealthStatusHealthy
+}
+
+// ToResult converts HealthCheckResult to the shared health.Result type.
+func (h *HealthCheckResult) ToResult() *health.Result {
+	details := h.Details
+	if details == nil {
+		details = make(map[string]any)
+	}
+	details["pending_messages"] = h.PendingMessages
+	details["stuck_messages"] = h.StuckMessages
+	return &health.Result{
+		Status:    h.Status,
+		Message:   h.Message,
+		Latency:   h.Latency,
+		CheckedAt: h.CheckedAt,
+		Details:   details,
+	}
 }
 
 // HealthChecker is an optional interface that schedulers can implement
