@@ -242,6 +242,22 @@ type options struct {
 	// Default: 100ms
 	pollInterval time.Duration
 
+	// minPollInterval is the minimum poll interval for adaptive polling.
+	// When adaptive polling is enabled, the interval will not go below this.
+	// Default: 10ms
+	minPollInterval time.Duration
+
+	// maxPollInterval is the maximum poll interval for adaptive polling.
+	// When adaptive polling is enabled, the interval will not exceed this.
+	// Default: 5s
+	maxPollInterval time.Duration
+
+	// adaptivePolling enables adaptive poll interval adjustment.
+	// When enabled, the scheduler increases the poll interval when no
+	// messages are found and decreases it when messages are processed.
+	// Default: false
+	adaptivePolling bool
+
 	// batchSize is the maximum number of messages to process per poll.
 	// Default: 100
 	batchSize int
@@ -288,18 +304,24 @@ type options struct {
 //
 // Defaults:
 //   - pollInterval: 100ms
+//   - minPollInterval: 10ms
+//   - maxPollInterval: 5s
+//   - adaptivePolling: false
 //   - batchSize: 100
 //   - keyPrefix: "scheduler:"
 //   - table: "scheduled_messages"
 //   - collection: "scheduled_messages"
 func defaultOptions() *options {
 	return &options{
-		pollInterval: 100 * time.Millisecond,
-		batchSize:    100,
-		keyPrefix:    "scheduler:",
-		table:        "scheduled_messages",
-		collection:   "scheduled_messages",
-		logger:       slog.Default(),
+		pollInterval:    100 * time.Millisecond,
+		minPollInterval: 10 * time.Millisecond,
+		maxPollInterval: 5 * time.Second,
+		adaptivePolling: false,
+		batchSize:       100,
+		keyPrefix:       "scheduler:",
+		table:           "scheduled_messages",
+		collection:      "scheduled_messages",
+		logger:          slog.Default(),
 	}
 }
 
@@ -321,6 +343,71 @@ func WithPollInterval(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.pollInterval = d
+		}
+	}
+}
+
+// WithAdaptivePolling enables adaptive poll interval adjustment.
+//
+// When enabled, the scheduler dynamically adjusts the poll interval:
+//   - Decreases toward minPollInterval when messages are found (high activity)
+//   - Increases toward maxPollInterval when no messages are found (low activity)
+//
+// This reduces database load during idle periods while maintaining low latency
+// when messages are due. The initial poll interval is set to the base pollInterval.
+//
+// Example:
+//
+//	// Enable adaptive polling with custom min/max bounds
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithAdaptivePolling(true),
+//	    WithMinPollInterval(10*time.Millisecond),
+//	    WithMaxPollInterval(2*time.Second),
+//	)
+func WithAdaptivePolling(enabled bool) Option {
+	return func(o *options) {
+		o.adaptivePolling = enabled
+	}
+}
+
+// WithMinPollInterval sets the minimum poll interval for adaptive polling.
+//
+// When adaptive polling is enabled and messages are being processed,
+// the poll interval will decrease but not below this minimum.
+//
+// Default: 10ms
+//
+// Example:
+//
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithAdaptivePolling(true),
+//	    WithMinPollInterval(5*time.Millisecond),
+//	)
+func WithMinPollInterval(d time.Duration) Option {
+	return func(o *options) {
+		if d > 0 {
+			o.minPollInterval = d
+		}
+	}
+}
+
+// WithMaxPollInterval sets the maximum poll interval for adaptive polling.
+//
+// When adaptive polling is enabled and no messages are found,
+// the poll interval will increase but not exceed this maximum.
+//
+// Default: 5s
+//
+// Example:
+//
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithAdaptivePolling(true),
+//	    WithMaxPollInterval(10*time.Second),
+//	)
+func WithMaxPollInterval(d time.Duration) Option {
+	return func(o *options) {
+		if d > 0 {
+			o.maxPollInterval = d
 		}
 	}
 }
@@ -506,4 +593,39 @@ func WithDLQ(d DeadLetterQueue) Option {
 	return func(o *options) {
 		o.dlq = d
 	}
+}
+
+// adaptivePollState tracks state for adaptive polling.
+type adaptivePollState struct {
+	current time.Duration
+	min     time.Duration
+	max     time.Duration
+}
+
+// newAdaptivePollState creates a new adaptive poll state.
+func newAdaptivePollState(initial, min, max time.Duration) *adaptivePollState {
+	return &adaptivePollState{
+		current: initial,
+		min:     min,
+		max:     max,
+	}
+}
+
+// adjust adjusts the poll interval based on whether messages were processed.
+// Returns the new poll interval.
+func (s *adaptivePollState) adjust(messagesProcessed int) time.Duration {
+	if messagesProcessed > 0 {
+		// Messages found - decrease interval (more activity expected)
+		s.current = s.current * 3 / 4 // Reduce by 25%
+		if s.current < s.min {
+			s.current = s.min
+		}
+	} else {
+		// No messages - increase interval (less activity expected)
+		s.current = s.current * 3 / 2 // Increase by 50%
+		if s.current > s.max {
+			s.current = s.max
+		}
+	}
+	return s.current
 }

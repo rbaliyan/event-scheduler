@@ -303,17 +303,37 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 // Start begins the scheduler polling loop.
 // Also periodically recovers messages stuck in "processing" state
 // (from crashed scheduler instances).
+//
+// When adaptive polling is enabled, the poll interval adjusts dynamically:
+// - Decreases when messages are found (more activity expected)
+// - Increases when no messages are found (less activity expected)
 func (s *MongoScheduler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(s.opts.pollInterval)
+	currentInterval := s.opts.pollInterval
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 
 	// Recovery ticker for stuck messages (check every minute)
 	recoveryTicker := time.NewTicker(time.Minute)
 	defer recoveryTicker.Stop()
 
-	s.logger.Info("scheduler started",
-		"poll_interval", s.opts.pollInterval,
-		"batch_size", s.opts.batchSize)
+	// Initialize adaptive polling state if enabled
+	var adaptiveState *adaptivePollState
+	if s.opts.adaptivePolling {
+		adaptiveState = newAdaptivePollState(
+			s.opts.pollInterval,
+			s.opts.minPollInterval,
+			s.opts.maxPollInterval,
+		)
+		s.logger.Info("scheduler started with adaptive polling",
+			"initial_interval", s.opts.pollInterval,
+			"min_interval", s.opts.minPollInterval,
+			"max_interval", s.opts.maxPollInterval,
+			"batch_size", s.opts.batchSize)
+	} else {
+		s.logger.Info("scheduler started",
+			"poll_interval", s.opts.pollInterval,
+			"batch_size", s.opts.batchSize)
+	}
 
 	// Recover any stuck messages at startup
 	s.recoverStuck(ctx)
@@ -327,7 +347,16 @@ func (s *MongoScheduler) Start(ctx context.Context) error {
 			close(s.stoppedCh)
 			return nil
 		case <-ticker.C:
-			s.processDue(ctx)
+			processed := s.processDue(ctx)
+
+			// Adjust poll interval if adaptive polling is enabled
+			if adaptiveState != nil {
+				newInterval := adaptiveState.adjust(processed)
+				if newInterval != currentInterval {
+					currentInterval = newInterval
+					ticker.Reset(currentInterval)
+				}
+			}
 		case <-recoveryTicker.C:
 			s.recoverStuck(ctx)
 		}
@@ -354,7 +383,9 @@ func (s *MongoScheduler) Stop(ctx context.Context) error {
 // 2. Publish to transport
 // 3. Delete the message
 // If the scheduler crashes after claiming, recoverStuck will move it back to pending.
-func (s *MongoScheduler) processDue(ctx context.Context) {
+// Returns the number of messages processed (for adaptive polling).
+func (s *MongoScheduler) processDue(ctx context.Context) int {
+	processed := 0
 	now := time.Now()
 
 	// Reset backoff state at the start of each processing cycle
@@ -460,7 +491,9 @@ func (s *MongoScheduler) processDue(ctx context.Context) {
 		s.logger.Debug("delivered scheduled message",
 			"id", msg.ID,
 			"event", msg.EventName)
+		processed++
 	}
+	return processed
 }
 
 // claimDue atomically claims a due message for processing.

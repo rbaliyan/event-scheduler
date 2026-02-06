@@ -257,13 +257,33 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 }
 
 // Start begins the scheduler polling loop
+//
+// When adaptive polling is enabled, the poll interval adjusts dynamically:
+// - Decreases when messages are found (more activity expected)
+// - Increases when no messages are found (less activity expected)
 func (s *PostgresScheduler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(s.opts.pollInterval)
+	currentInterval := s.opts.pollInterval
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 
-	s.logger.Info("scheduler started",
-		"poll_interval", s.opts.pollInterval,
-		"batch_size", s.opts.batchSize)
+	// Initialize adaptive polling state if enabled
+	var adaptiveState *adaptivePollState
+	if s.opts.adaptivePolling {
+		adaptiveState = newAdaptivePollState(
+			s.opts.pollInterval,
+			s.opts.minPollInterval,
+			s.opts.maxPollInterval,
+		)
+		s.logger.Info("scheduler started with adaptive polling",
+			"initial_interval", s.opts.pollInterval,
+			"min_interval", s.opts.minPollInterval,
+			"max_interval", s.opts.maxPollInterval,
+			"batch_size", s.opts.batchSize)
+	} else {
+		s.logger.Info("scheduler started",
+			"poll_interval", s.opts.pollInterval,
+			"batch_size", s.opts.batchSize)
+	}
 
 	for {
 		select {
@@ -274,7 +294,16 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 			close(s.stoppedCh)
 			return nil
 		case <-ticker.C:
-			s.processDue(ctx)
+			processed := s.processDue(ctx)
+
+			// Adjust poll interval if adaptive polling is enabled
+			if adaptiveState != nil {
+				newInterval := adaptiveState.adjust(processed)
+				if newInterval != currentInterval {
+					currentInterval = newInterval
+					ticker.Reset(currentInterval)
+				}
+			}
 		}
 	}
 }
@@ -294,7 +323,8 @@ func (s *PostgresScheduler) Stop(ctx context.Context) error {
 }
 
 // processDue processes messages that are due for delivery
-func (s *PostgresScheduler) processDue(ctx context.Context) {
+// Returns the number of messages processed (for adaptive polling).
+func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	// Reset backoff state at the start of each processing cycle
 	if s.opts.backoff != nil {
 		if r, ok := s.opts.backoff.(Resetter); ok {
@@ -305,7 +335,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		s.logger.Error("failed to begin transaction", "error", err)
-		return
+		return 0
 	}
 	defer tx.Rollback()
 
@@ -322,7 +352,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 	rows, err := tx.QueryContext(ctx, query, time.Now(), s.opts.batchSize)
 	if err != nil {
 		s.logger.Error("failed to query due messages", "error", err)
-		return
+		return 0
 	}
 	defer rows.Close()
 
@@ -437,7 +467,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		_, err = tx.ExecContext(ctx, deleteQuery, toDelete)
 		if err != nil {
 			s.logger.Error("failed to delete delivered messages", "error", err)
-			return
+			return 0
 		}
 	}
 
@@ -447,7 +477,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 		_, err = tx.ExecContext(ctx, discardQuery, toDiscard)
 		if err != nil {
 			s.logger.Error("failed to delete discarded messages", "error", err)
-			return
+			return 0
 		}
 	}
 
@@ -466,7 +496,10 @@ func (s *PostgresScheduler) processDue(ctx context.Context) {
 
 	if err := tx.Commit(); err != nil {
 		s.logger.Error("failed to commit transaction", "error", err)
+		return 0
 	}
+
+	return len(toDelete)
 }
 
 // EnsureTable creates the scheduled_messages table if it doesn't exist.

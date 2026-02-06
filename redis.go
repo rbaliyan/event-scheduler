@@ -258,20 +258,40 @@ func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 // Also periodically recovers messages stuck in "processing" state
 // (from crashed scheduler instances).
 //
+// When adaptive polling is enabled, the poll interval adjusts dynamically:
+// - Decreases when messages are found (more activity expected)
+// - Increases when no messages are found (less activity expected)
+//
 // Example:
 //
 //	go scheduler.Start(ctx)
 func (s *RedisScheduler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(s.opts.pollInterval)
+	currentInterval := s.opts.pollInterval
+	ticker := time.NewTicker(currentInterval)
 	defer ticker.Stop()
 
 	// Recovery ticker for stuck messages (check every minute)
 	recoveryTicker := time.NewTicker(time.Minute)
 	defer recoveryTicker.Stop()
 
-	s.logger.Info("scheduler started",
-		"poll_interval", s.opts.pollInterval,
-		"batch_size", s.opts.batchSize)
+	// Initialize adaptive polling state if enabled
+	var adaptiveState *adaptivePollState
+	if s.opts.adaptivePolling {
+		adaptiveState = newAdaptivePollState(
+			s.opts.pollInterval,
+			s.opts.minPollInterval,
+			s.opts.maxPollInterval,
+		)
+		s.logger.Info("scheduler started with adaptive polling",
+			"initial_interval", s.opts.pollInterval,
+			"min_interval", s.opts.minPollInterval,
+			"max_interval", s.opts.maxPollInterval,
+			"batch_size", s.opts.batchSize)
+	} else {
+		s.logger.Info("scheduler started",
+			"poll_interval", s.opts.pollInterval,
+			"batch_size", s.opts.batchSize)
+	}
 
 	// Recover any stuck messages at startup
 	s.recoverStuck(ctx)
@@ -285,7 +305,16 @@ func (s *RedisScheduler) Start(ctx context.Context) error {
 			close(s.stoppedCh)
 			return nil
 		case <-ticker.C:
-			s.processDue(ctx)
+			processed := s.processDue(ctx)
+
+			// Adjust poll interval if adaptive polling is enabled
+			if adaptiveState != nil {
+				newInterval := adaptiveState.adjust(processed)
+				if newInterval != currentInterval {
+					currentInterval = newInterval
+					ticker.Reset(currentInterval)
+				}
+			}
 		case <-recoveryTicker.C:
 			s.recoverStuck(ctx)
 		}
@@ -315,7 +344,9 @@ func (s *RedisScheduler) Stop(ctx context.Context) error {
 // 2. Publish to transport
 // 3. Remove from "processing" set
 // If the scheduler crashes after step 1, recoverStuck will move it back.
-func (s *RedisScheduler) processDue(ctx context.Context) {
+// Returns the number of messages processed (for adaptive polling).
+func (s *RedisScheduler) processDue(ctx context.Context) int {
+	processed := 0
 	now := time.Now().Unix()
 
 	// Reset backoff state at the start of each processing cycle to avoid
@@ -424,7 +455,9 @@ func (s *RedisScheduler) processDue(ctx context.Context) {
 		s.logger.Debug("delivered scheduled message",
 			"id", msg.ID,
 			"event", msg.EventName)
+		processed++
 	}
+	return processed
 }
 
 // claimDueMessage atomically claims a due message using a Lua script.

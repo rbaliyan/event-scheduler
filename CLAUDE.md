@@ -24,7 +24,7 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 - `Filter`: Criteria for listing scheduled messages
 - `BackoffStrategy`: Interface for retry backoff (compatible with `event/v3/backoff`)
 - `DeadLetterQueue`: Interface for DLQ storage (compatible with `event-dlq` Manager)
-- Option functions: `WithPollInterval`, `WithBatchSize`, `WithKeyPrefix`, `WithTable`, `WithCollection`, `WithMetrics`, `WithBackoff`, `WithMaxRetries`, `WithDLQ`
+- Option functions: `WithPollInterval`, `WithBatchSize`, `WithKeyPrefix`, `WithTable`, `WithCollection`, `WithMetrics`, `WithBackoff`, `WithMaxRetries`, `WithDLQ`, `WithAdaptivePolling`, `WithMinPollInterval`, `WithMaxPollInterval`
 
 **Redis Scheduler (redis.go)** - Production-ready Redis implementation:
 - Uses sorted sets with scheduled time as score
@@ -90,6 +90,30 @@ All three backends have identical retry behavior:
 4. Backoff state is reset at the start of each processing cycle
 5. Without backoff, failed messages are retried on the next poll
 
+### Adaptive Polling
+
+All three backends support adaptive poll interval adjustment to optimize for both low latency and reduced database load:
+
+```go
+scheduler := NewRedisScheduler(client, transport,
+    WithAdaptivePolling(true),        // Enable adaptive polling
+    WithPollInterval(100*time.Millisecond),  // Initial/base interval
+    WithMinPollInterval(10*time.Millisecond), // Minimum interval (high activity)
+    WithMaxPollInterval(5*time.Second),       // Maximum interval (low activity)
+)
+```
+
+**Behavior:**
+- When messages are found and processed, the interval decreases (more activity expected)
+- When no messages are found, the interval increases (less activity expected)
+- The interval stays within the configured min/max bounds
+
+**Adjustment Algorithm:**
+- Messages found: `interval = interval * 3/4` (decrease by 25%)
+- No messages: `interval = interval * 3/2` (increase by 50%)
+
+This reduces database load during idle periods while maintaining low latency during bursts of activity.
+
 ### Dead-Letter Queue
 
 The `DeadLetterQueue` interface provides loose coupling to DLQ implementations:
@@ -154,6 +178,9 @@ Returns `HealthStatusUnhealthy` if database is not responsive.
 ### Default Configuration
 
 - Poll Interval: 100ms
+- Min Poll Interval: 10ms (for adaptive polling)
+- Max Poll Interval: 5s (for adaptive polling)
+- Adaptive Polling: disabled
 - Batch Size: 100
 - Key Prefix: "scheduler:" (Redis)
 - Table: "scheduled_messages" (PostgreSQL)
