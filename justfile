@@ -42,6 +42,10 @@ vulncheck:
 depcheck:
     go list -m -u all | grep '\[' || echo "All dependencies are up to date"
 
+# Generate protobuf code
+proto:
+    buf generate
+
 # Create and push a new release tag (bumps patch version)
 release:
     ./scripts/release.sh
