@@ -21,6 +21,7 @@ A production-grade delayed and scheduled message delivery library for Go. Schedu
 - **Configurable Polling**: Adjustable poll intervals and batch sizes
 - **Cancellation Support**: Cancel scheduled messages before delivery
 - **Sentinel Errors**: Use `errors.Is(err, scheduler.ErrNotFound)` for programmatic error handling
+- **gRPC + HTTP API**: Read-only gRPC service with HTTP/JSON gateway for operational tooling
 
 ## Installation
 
@@ -271,6 +272,96 @@ messages, err := sched.List(ctx, scheduler.Filter{
 messages, err := sched.List(ctx, scheduler.Filter{
     After: time.Now(),
 })
+```
+
+## gRPC and HTTP API
+
+The scheduler includes a read-only gRPC service with an HTTP/JSON gateway for operational tooling, dashboards, and monitoring.
+
+### In-Process Setup (Recommended)
+
+When the scheduler and HTTP server run in the same process, use `NewInProcessHandler` to avoid network overhead:
+
+```go
+import (
+    "net/http"
+
+    scheduler "github.com/rbaliyan/event-scheduler"
+    "github.com/rbaliyan/event-scheduler/service"
+    "github.com/rbaliyan/event-scheduler/gateway"
+)
+
+// Create the gRPC service from an existing scheduler
+svc, err := service.New(sched)
+if err != nil {
+    panic(err)
+}
+
+// Create an HTTP handler (no gRPC network hop)
+handler, err := gateway.NewInProcessHandler(ctx, svc)
+if err != nil {
+    panic(err)
+}
+
+// Mount on your HTTP router
+http.Handle("/v1/", handler)
+http.ListenAndServe(":8080", nil)
+```
+
+### Remote Proxy Setup
+
+When the gRPC service runs separately, use `NewHandler` to proxy HTTP requests to the gRPC backend:
+
+```go
+handler, err := gateway.NewHandler(ctx, "scheduler-service:50051",
+    gateway.WithTLS(nil),  // Use system TLS defaults
+)
+if err != nil {
+    panic(err)
+}
+defer handler.Close()
+
+http.Handle("/v1/", handler)
+```
+
+### HTTP Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/messages/{id}` | Get a scheduled message by ID |
+| GET | `/v1/messages?event_name=...&limit=...&before=...&after=...` | List messages with optional filters |
+| GET | `/v1/health` | Scheduler health status |
+
+### gRPC Service
+
+The service can also be used directly with gRPC:
+
+```go
+import "google.golang.org/grpc"
+
+svc, _ := service.New(sched)
+
+grpcServer := grpc.NewServer()
+svc.Register(grpcServer)
+```
+
+### Gateway Options
+
+```go
+// TLS with system defaults
+gateway.WithTLS(nil)
+
+// TLS with custom config
+gateway.WithTLS(&tls.Config{MinVersion: tls.VersionTLS13})
+
+// Insecure (development only)
+gateway.WithInsecure()
+
+// Additional gRPC dial options
+gateway.WithDialOptions(grpc.WithAuthority("custom"))
+
+// Custom ServeMux options
+gateway.WithMuxOptions(runtime.WithErrorHandler(customHandler))
 ```
 
 ## Retry, Backoff, and Dead-Letter Queue

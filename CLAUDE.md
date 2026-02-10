@@ -9,6 +9,7 @@ go test ./...          # Run all tests
 go test -run TestName  # Run a specific test
 go build ./...         # Build all packages
 go mod tidy            # Clean up dependencies
+buf generate           # Regenerate proto (or: just proto)
 ```
 
 ## Project Overview
@@ -50,6 +51,26 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 - `EnsureTable()` for auto-creating the schema
 - `MigrateAddRetryCount()` for upgrading existing tables
 - Full retry/backoff/maxRetries/DLQ support
+
+**gRPC Service (service/)** - Read-only gRPC API for operational tooling:
+- `service.New(scheduler) (*Service, error)` creates the gRPC server
+- RPCs: `Get` (by ID), `List` (with filter), `Health` (scheduler status)
+- `HealthStatus` proto enum: `HEALTHY`, `DEGRADED`, `UNHEALTHY`
+- `ListResponse` includes `total_count` for truncation detection
+- Error mapping: `ErrNotFound` -> `NotFound`, `context.Canceled` -> `Canceled`, etc.
+- `Register(server)` registers the service with a gRPC server
+
+**HTTP Gateway (gateway/)** - gRPC-Gateway HTTP/JSON handler:
+- `NewHandler(ctx, grpcAddr, ...Option) (*Handler, error)` - remote proxy to gRPC backend
+- `NewInProcessHandler(ctx, svc, ...Option) (*Handler, error)` - direct in-process calls (no network)
+- HTTP routes: `GET /v1/messages/{id}`, `GET /v1/messages`, `GET /v1/health`
+- Options: `WithTLS`, `WithInsecure`, `WithDialOptions`, `WithMuxOptions`
+- `Handler.Close()` releases resources (idempotent, safe to call multiple times)
+
+**Proto Definition (proto/scheduler/v1/scheduler.proto)**:
+- Read-only SchedulerService (intentionally omits Schedule/Cancel)
+- Uses `google.api.http` annotations for REST mapping
+- Generated with `buf generate` (buf.gen.yaml, buf.yaml)
 
 **Metrics (metrics.go)** - OpenTelemetry metrics:
 - Counters: scheduled, delivered, failed, cancelled, recovered, DLQ sent
@@ -242,6 +263,9 @@ Use `EnsureTable()` to auto-create, or `MigrateAddRetryCount()` to add the colum
 - `github.com/redis/go-redis/v9` - Redis client
 - `go.mongodb.org/mongo-driver` - MongoDB driver
 - `go.opentelemetry.io/otel` - OpenTelemetry metrics and tracing
+- `google.golang.org/grpc` - gRPC server and client
+- `google.golang.org/protobuf` - Protocol Buffers runtime
+- `github.com/grpc-ecosystem/grpc-gateway/v2` - HTTP/JSON gateway for gRPC
 
 ## Related Libraries
 

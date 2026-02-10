@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+package scheduler.v1;
+
+option go_package = "github.com/rbaliyan/event-scheduler/proto/scheduler/v1;schedulerpb";
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+// SchedulerService provides read-only access to scheduled messages
+// and health status for operational tooling.
+//
+// This service intentionally omits write operations (Schedule, Cancel).
+// Use the Scheduler interface directly for mutating operations.
+service SchedulerService {
+  // Get retrieves a scheduled message by ID.
+  rpc Get(GetRequest) returns (GetResponse) {
+    option (google.api.http) = {
+      get: "/v1/messages/{id}"
+    };
+  }
+
+  // List returns scheduled messages matching a filter.
+  rpc List(ListRequest) returns (ListResponse) {
+    option (google.api.http) = {
+      get: "/v1/messages"
+    };
+  }
+
+  // Health returns the scheduler health status.
+  rpc Health(HealthRequest) returns (HealthResponse) {
+    option (google.api.http) = {
+      get: "/v1/health"
+    };
+  }
+}
+
+// GetRequest is the request for Get.
+message GetRequest {
+  string id = 1;
+}
+
+// GetResponse is the response for Get.
+message GetResponse {
+  Message message = 1;
+}
+
+// ListRequest is the request for List.
+message ListRequest {
+  // Filter by event name (empty = all events).
+  string event_name = 1;
+
+  // Messages scheduled before this time (unset = no maximum).
+  google.protobuf.Timestamp before = 2;
+
+  // Messages scheduled after this time (unset = no minimum).
+  google.protobuf.Timestamp after = 3;
+
+  // Maximum number of messages to return (0 = server default).
+  int32 limit = 4;
+}
+
+// ListResponse is the response for List.
+message ListResponse {
+  repeated Message messages = 1;
+
+  // Total number of messages returned. Consumers can compare this
+  // with the requested limit to determine if results were truncated.
+  int32 total_count = 2;
+}
+
+// HealthStatus represents the health state of the scheduler.
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_UNHEALTHY = 3;
+}
+
+// HealthRequest is the request for Health.
+message HealthRequest {}
+
+// HealthResponse is the response for Health.
+message HealthResponse {
+  // Health status of the scheduler.
+  HealthStatus status = 1;
+
+  // Human-readable status message.
+  string message = 2;
+
+  // Health check latency in milliseconds.
+  int64 latency_ms = 3;
+
+  // Additional details (e.g., pending_messages, stuck_messages).
+  map<string, string> details = 4;
+}
+
+// Message represents a scheduled message.
+message Message {
+  // Unique identifier.
+  string id = 1;
+
+  // Event/topic to publish to when delivered.
+  string event_name = 2;
+
+  // Message data.
+  bytes payload = 3;
+
+  // Additional key-value pairs.
+  map<string, string> metadata = 4;
+
+  // When the message should be delivered.
+  google.protobuf.Timestamp scheduled_at = 5;
+
+  // When the message was scheduled.
+  google.protobuf.Timestamp created_at = 6;
+
+  // Number of delivery attempts.
+  int32 retry_count = 7;
+}
