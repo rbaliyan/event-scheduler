@@ -93,25 +93,8 @@ func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Opti
 		logger:        o.logger.With("component", "scheduler.redis"),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
-		stuckDuration: 5 * time.Minute, // Recover stuck messages after 5 min
+		stuckDuration: o.stuckDuration,
 	}
-}
-
-// WithStuckDuration sets how long a message can be in "processing" before recovery.
-// Messages stuck in processing longer than this duration are moved back to pending.
-// This handles scheduler crashes where messages were claimed but never published.
-// Default: 5 minutes
-func (s *RedisScheduler) WithStuckDuration(d time.Duration) *RedisScheduler {
-	s.stuckDuration = d
-	return s
-}
-
-// WithLogger sets a custom logger for the scheduler.
-//
-// Returns the scheduler for method chaining.
-func (s *RedisScheduler) WithLogger(l *slog.Logger) *RedisScheduler {
-	s.logger = l
-	return s
 }
 
 // Schedule adds a message for future delivery.

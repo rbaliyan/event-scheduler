@@ -126,29 +126,8 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 		logger:        o.logger.With("component", "scheduler.mongodb"),
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
-		stuckDuration: 5 * time.Minute, // Recover messages stuck in processing after 5 min
+		stuckDuration: o.stuckDuration,
 	}
-}
-
-// WithCollection sets a custom collection name
-func (s *MongoScheduler) WithCollection(name string) *MongoScheduler {
-	s.collection = s.collection.Database().Collection(name)
-	return s
-}
-
-// WithLogger sets a custom logger
-func (s *MongoScheduler) WithLogger(l *slog.Logger) *MongoScheduler {
-	s.logger = l
-	return s
-}
-
-// WithStuckDuration sets how long a message can be in "processing" before recovery.
-// Messages stuck in processing longer than this duration are moved back to pending.
-// This handles scheduler crashes where messages were claimed but never published.
-// Default: 5 minutes
-func (s *MongoScheduler) WithStuckDuration(d time.Duration) *MongoScheduler {
-	s.stuckDuration = d
-	return s
 }
 
 // Collection returns the underlying MongoDB collection

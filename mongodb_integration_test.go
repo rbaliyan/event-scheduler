@@ -37,8 +37,8 @@ func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Mong
 	collName := fmt.Sprintf("sched_%d", time.Now().UnixNano())
 	db := client.Database(dbName)
 
-	allOpts := append([]Option{WithPollInterval(50 * time.Millisecond)}, opts...)
-	sched := NewMongoScheduler(db, tr, allOpts...).WithCollection(collName)
+	allOpts := append([]Option{WithPollInterval(50 * time.Millisecond), WithCollection(collName)}, opts...)
+	sched := NewMongoScheduler(db, tr, allOpts...)
 
 	if err := sched.EnsureIndexes(context.Background()); err != nil {
 		t.Fatalf("failed to ensure indexes: %v", err)
@@ -382,7 +382,7 @@ func TestMongo_Integration_StuckRecovery(t *testing.T) {
 	mt := newMockTransport()
 	sched, cleanup := setupMongoScheduler(t, mt)
 	defer cleanup()
-	sched.WithStuckDuration(1 * time.Second)
+	sched.stuckDuration = 1 * time.Second
 
 	ctx := context.Background()
 
