@@ -387,6 +387,12 @@ type options struct {
 	// When set, messages are sent to the DLQ before being removed.
 	dlq DeadLetterQueue
 
+	// stuckDuration is how long a message can be in "processing" before recovery.
+	// Messages stuck in processing longer than this duration are moved back to pending.
+	// This handles scheduler crashes where messages were claimed but never published.
+	// Default: 5 minutes
+	stuckDuration time.Duration
+
 	// logger is the logger for scheduler operations.
 	// Default: slog.Default()
 	logger *slog.Logger
@@ -413,6 +419,7 @@ func defaultOptions() *options {
 		keyPrefix:       "scheduler:",
 		table:           "scheduled_messages",
 		collection:      "scheduled_messages",
+		stuckDuration:   5 * time.Minute,
 		logger:          slog.Default(),
 	}
 }
@@ -684,6 +691,24 @@ func WithMaxRetries(max int) Option {
 func WithDLQ(d DeadLetterQueue) Option {
 	return func(o *options) {
 		o.dlq = d
+	}
+}
+
+// WithStuckDuration sets how long a message can be in "processing" before recovery.
+// Messages stuck in processing longer than this duration are moved back to pending.
+// This handles scheduler crashes where messages were claimed but never published.
+// Default: 5 minutes
+//
+// Example:
+//
+//	scheduler := NewRedisScheduler(client, transport,
+//	    WithStuckDuration(10*time.Minute),
+//	)
+func WithStuckDuration(d time.Duration) Option {
+	return func(o *options) {
+		if d > 0 {
+			o.stuckDuration = d
+		}
 	}
 }
 

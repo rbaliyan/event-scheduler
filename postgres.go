@@ -71,18 +71,6 @@ func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) *Po
 	}
 }
 
-// WithTable sets a custom table name
-func (s *PostgresScheduler) WithTable(table string) *PostgresScheduler {
-	s.table = table
-	return s
-}
-
-// WithLogger sets a custom logger
-func (s *PostgresScheduler) WithLogger(l *slog.Logger) *PostgresScheduler {
-	s.logger = l
-	return s
-}
-
 // Schedule adds a message for future delivery
 func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 	if msg.ID == "" {

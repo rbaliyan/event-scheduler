@@ -378,7 +378,7 @@ func TestRedis_Integration_StuckRecovery(t *testing.T) {
 	mt := newMockTransport()
 	sched, cleanup := setupRedisScheduler(t, mt)
 	defer cleanup()
-	sched.WithStuckDuration(1 * time.Second)
+	sched.stuckDuration = 1 * time.Second
 
 	ctx := context.Background()
 
