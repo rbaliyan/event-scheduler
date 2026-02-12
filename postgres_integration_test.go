@@ -32,7 +32,11 @@ func setupPostgresScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*P
 
 	tableName := fmt.Sprintf("sched_test_%d", time.Now().UnixNano())
 	allOpts := append([]Option{WithPollInterval(50 * time.Millisecond), WithTable(tableName)}, opts...)
-	sched := NewPostgresScheduler(db, tr, allOpts...)
+	sched, err := NewPostgresScheduler(db, tr, allOpts...)
+	if err != nil {
+		db.Close()
+		t.Fatalf("failed to create scheduler: %v", err)
+	}
 
 	if err := sched.EnsureTable(context.Background()); err != nil {
 		db.Close()

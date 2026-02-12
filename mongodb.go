@@ -109,14 +109,22 @@ type MongoScheduler struct {
 //   - t: required - transport for publishing messages (must not be nil)
 //   - opts: optional configuration options
 //
-// Panics if db or t is nil (programming error).
-func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option) *MongoScheduler {
-	eventerrors.RequireNotNil(db, "db")
-	eventerrors.RequireNotNil(t, "transport")
+// Returns an error if db or t is nil.
+func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option) (*MongoScheduler, error) {
+	if err := eventerrors.RequireNotNil(db, "db"); err != nil {
+		return nil, err
+	}
+	if err := eventerrors.RequireNotNil(t, "transport"); err != nil {
+		return nil, err
+	}
 
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)
+	}
+
+	if !validIdentifier.MatchString(o.collection) {
+		return nil, fmt.Errorf("scheduler: invalid collection name %q", o.collection)
 	}
 
 	return &MongoScheduler{
@@ -127,7 +135,7 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
 		stuckDuration: o.stuckDuration,
-	}
+	}, nil
 }
 
 // Collection returns the underlying MongoDB collection
