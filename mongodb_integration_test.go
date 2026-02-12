@@ -38,7 +38,11 @@ func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Mong
 	db := client.Database(dbName)
 
 	allOpts := append([]Option{WithPollInterval(50 * time.Millisecond), WithCollection(collName)}, opts...)
-	sched := NewMongoScheduler(db, tr, allOpts...)
+	sched, err := NewMongoScheduler(db, tr, allOpts...)
+	if err != nil {
+		_ = client.Disconnect(context.Background())
+		t.Fatalf("failed to create scheduler: %v", err)
+	}
 
 	if err := sched.EnsureIndexes(context.Background()); err != nil {
 		t.Fatalf("failed to ensure indexes: %v", err)

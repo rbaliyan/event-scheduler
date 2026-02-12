@@ -76,10 +76,14 @@ type RedisScheduler struct {
 // Example:
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	scheduler := scheduler.NewRedisScheduler(rdb, transport)
-func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Option) *RedisScheduler {
-	eventerrors.RequireNotNil(client, "client")
-	eventerrors.RequireNotNil(t, "transport")
+//	scheduler, err := scheduler.NewRedisScheduler(rdb, transport)
+func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Option) (*RedisScheduler, error) {
+	if err := eventerrors.RequireNotNil(client, "client"); err != nil {
+		return nil, err
+	}
+	if err := eventerrors.RequireNotNil(t, "transport"); err != nil {
+		return nil, err
+	}
 
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -94,7 +98,7 @@ func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Opti
 		stopCh:        make(chan struct{}),
 		stoppedCh:     make(chan struct{}),
 		stuckDuration: o.stuckDuration,
-	}
+	}, nil
 }
 
 // Schedule adds a message for future delivery.

@@ -50,14 +50,22 @@ type PostgresScheduler struct {
 //   - t: required - transport for publishing messages (must not be nil)
 //   - opts: optional configuration options
 //
-// Panics if db or t is nil (programming error).
-func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) *PostgresScheduler {
-	eventerrors.RequireNotNil(db, "db")
-	eventerrors.RequireNotNil(t, "transport")
+// Returns an error if db or t is nil.
+func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) (*PostgresScheduler, error) {
+	if err := eventerrors.RequireNotNil(db, "db"); err != nil {
+		return nil, err
+	}
+	if err := eventerrors.RequireNotNil(t, "transport"); err != nil {
+		return nil, err
+	}
 
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)
+	}
+
+	if !validIdentifier.MatchString(o.table) {
+		return nil, fmt.Errorf("scheduler: invalid table name %q", o.table)
 	}
 
 	return &PostgresScheduler{
@@ -68,7 +76,7 @@ func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) *Po
 		logger:    o.logger.With("component", "scheduler.postgres"),
 		stopCh:    make(chan struct{}),
 		stoppedCh: make(chan struct{}),
-	}
+	}, nil
 }
 
 // Schedule adds a message for future delivery

@@ -27,7 +27,10 @@ func setupRedisScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Redi
 
 	prefix := testPrefix()
 	allOpts := append([]Option{WithKeyPrefix(prefix), WithPollInterval(50 * time.Millisecond)}, opts...)
-	sched := NewRedisScheduler(client, tr, allOpts...)
+	sched, err := NewRedisScheduler(client, tr, allOpts...)
+	if err != nil {
+		t.Fatalf("failed to create scheduler: %v", err)
+	}
 
 	cleanup := func() {
 		ctx := context.Background()

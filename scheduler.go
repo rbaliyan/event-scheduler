@@ -53,7 +53,6 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"regexp"
 	"time"
@@ -553,9 +552,6 @@ func WithKeyPrefix(prefix string) Option {
 func WithTable(table string) Option {
 	return func(o *options) {
 		if table != "" {
-			if !validIdentifier.MatchString(table) {
-				panic(fmt.Sprintf("scheduler: invalid table name %q", table))
-			}
 			o.table = table
 		}
 	}
@@ -571,9 +567,6 @@ func WithTable(table string) Option {
 func WithCollection(collection string) Option {
 	return func(o *options) {
 		if collection != "" {
-			if !validIdentifier.MatchString(collection) {
-				panic(fmt.Sprintf("scheduler: invalid collection name %q", collection))
-			}
 			o.collection = collection
 		}
 	}
