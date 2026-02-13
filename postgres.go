@@ -588,15 +588,15 @@ func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
 // Note: PostgreSQL scheduler uses FOR UPDATE SKIP LOCKED, so there's no
 // separate "stuck" state. Messages are atomically locked within transactions.
 //
-// Returns HealthStatusHealthy if PostgreSQL is responsive.
-// Returns HealthStatusUnhealthy if PostgreSQL is not responsive.
+// Returns health.StatusHealthy if PostgreSQL is responsive.
+// Returns health.StatusUnhealthy if PostgreSQL is not responsive.
 func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
 
 	// Ping PostgreSQL
 	if err := s.db.PingContext(ctx); err != nil {
 		return &health.Result{
-			Status:    HealthStatusUnhealthy,
+			Status:    health.StatusUnhealthy,
 			Message:   fmt.Sprintf("postgres ping failed: %v", err),
 			Latency:   time.Since(start),
 			CheckedAt: start,
@@ -606,9 +606,9 @@ func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	// Count pending messages
 	pending, err := s.CountPending(ctx)
 	message := ""
-	status := HealthStatusHealthy
+	status := health.StatusHealthy
 	if err != nil {
-		status = HealthStatusDegraded
+		status = health.StatusDegraded
 		message = fmt.Sprintf("failed to count pending: %v", err)
 	}
 
