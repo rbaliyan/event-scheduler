@@ -636,42 +636,42 @@ func (s *RedisScheduler) SetupMetricsCallbacks(ctx context.Context) {
 //   - Counts pending messages
 //   - Counts stuck messages (if any)
 //
-// Returns HealthStatusHealthy if Redis is responsive and no stuck messages.
-// Returns HealthStatusDegraded if stuck messages exist.
-// Returns HealthStatusUnhealthy if Redis is not responsive.
+// Returns health.StatusHealthy if Redis is responsive and no stuck messages.
+// Returns health.StatusDegraded if stuck messages exist.
+// Returns health.StatusUnhealthy if Redis is not responsive.
 func (s *RedisScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
 
 	// Ping Redis
 	if err := s.client.Ping(ctx).Err(); err != nil {
 		return &health.Result{
-			Status:    HealthStatusUnhealthy,
+			Status:    health.StatusUnhealthy,
 			Message:   fmt.Sprintf("redis ping failed: %v", err),
 			Latency:   time.Since(start),
 			CheckedAt: start,
 		}
 	}
 
-	status := HealthStatusHealthy
+	status := health.StatusHealthy
 	var message string
 
 	// Count pending messages
 	pending, err := s.CountPending(ctx)
 	if err != nil {
-		status = HealthStatusDegraded
+		status = health.StatusDegraded
 		message = fmt.Sprintf("failed to count pending: %v", err)
 	}
 
 	// Count stuck messages
 	stuck, err := s.CountStuck(ctx)
 	if err != nil {
-		status = HealthStatusDegraded
+		status = health.StatusDegraded
 		message = fmt.Sprintf("failed to count stuck: %v", err)
 	}
 
 	// Degraded if stuck messages exist
-	if stuck > 0 && status == HealthStatusHealthy {
-		status = HealthStatusDegraded
+	if stuck > 0 && status == health.StatusHealthy {
+		status = health.StatusDegraded
 		message = fmt.Sprintf("%d messages stuck in processing", stuck)
 	}
 

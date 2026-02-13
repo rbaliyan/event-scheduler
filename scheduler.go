@@ -138,37 +138,13 @@ type Scheduler interface {
 	Stop(ctx context.Context) error
 }
 
-// HealthStatus represents the health state of the scheduler.
-// This is an alias to the shared health package type for ecosystem consistency.
-type HealthStatus = health.Status
-
-// Health status constants - these alias the shared health package constants.
-const (
-	// HealthStatusHealthy indicates the scheduler is functioning normally.
-	HealthStatusHealthy = health.StatusHealthy
-	// HealthStatusDegraded indicates the scheduler is functioning but with issues.
-	HealthStatusDegraded = health.StatusDegraded
-	// HealthStatusUnhealthy indicates the scheduler is not functioning.
-	HealthStatusUnhealthy = health.StatusUnhealthy
-)
-
-// HealthCheckResult is an alias for the shared health.Result type.
-// Scheduler-specific fields are stored in the Details map:
-//   - pending_messages: number of pending scheduled messages
-//   - stuck_messages: number of messages stuck in processing
-//
-// Deprecated: Use health.Result directly for new code.
-type HealthCheckResult = health.Result
-
 // HealthChecker is an optional interface that schedulers can implement
 // to provide health check capabilities for monitoring and readiness probes.
-//
-// This interface uses the shared health.Checker signature for ecosystem consistency.
 type HealthChecker = health.Checker
 
 // NewHealthResult creates a health result with scheduler-specific details.
 // This is a helper for creating health results with pending/stuck message counts.
-func NewHealthResult(status HealthStatus, message string, latency time.Duration, pending, stuck int64) *health.Result {
+func NewHealthResult(status health.Status, message string, latency time.Duration, pending, stuck int64) *health.Result {
 	return &health.Result{
 		Status:    status,
 		Message:   message,
