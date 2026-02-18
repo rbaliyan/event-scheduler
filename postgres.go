@@ -81,6 +81,12 @@ func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) (*P
 
 // Schedule adds a message for future delivery
 func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
+	if msg.EventName == "" {
+		return fmt.Errorf("schedule: event name must not be empty")
+	}
+	if msg.ScheduledAt.IsZero() {
+		return fmt.Errorf("schedule: scheduled_at must not be zero")
+	}
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
 	}
@@ -127,6 +133,10 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 
 // Cancel cancels a scheduled message
 func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("cancel: id must not be empty")
+	}
+
 	// First, get the event name for metrics if enabled
 	var eventName string
 	if s.opts.metrics != nil {
@@ -157,6 +167,10 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 
 // Get retrieves a scheduled message by ID
 func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error) {
+	if id == "" {
+		return nil, fmt.Errorf("get: id must not be empty")
+	}
+
 	query := fmt.Sprintf(`
 		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
@@ -259,6 +273,10 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 		}
 
 		messages = append(messages, &msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
 
 	return messages, nil

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -22,17 +23,18 @@ MongoDB Schema:
 Collection: scheduled_messages
 
 Document structure:
-{
-    "_id": string (message ID),
-    "event_name": string,
-    "payload": Binary,
-    "metadata": object,
-    "scheduled_at": ISODate,
-    "created_at": ISODate,
-    "status": string (pending/processing),
-    "claimed_at": ISODate (optional, set when processing),
-    "retry_count": int (0 by default)
-}
+
+	{
+	    "_id": string (message ID),
+	    "event_name": string,
+	    "payload": Binary,
+	    "metadata": object,
+	    "scheduled_at": ISODate,
+	    "created_at": ISODate,
+	    "status": string (pending/processing),
+	    "claimed_at": ISODate (optional, set when processing),
+	    "retry_count": int (0 by default)
+	}
 
 Indexes:
 db.scheduled_messages.createIndex({ "scheduled_at": 1 })
@@ -77,7 +79,7 @@ func (m *mongoMessage) toMessage() *Message {
 	}
 }
 
-// FromMessage creates a mongoMessage from Message
+// fromMessage creates a mongoMessage from Message
 func fromMessage(m *Message) *mongoMessage {
 	return &mongoMessage{
 		ID:          m.ID,
@@ -92,14 +94,13 @@ func fromMessage(m *Message) *mongoMessage {
 
 // MongoScheduler uses MongoDB for scheduling
 type MongoScheduler struct {
-	collection    *mongo.Collection
-	transport     transport.Transport
-	opts          *options
-	logger        *slog.Logger
-	stopCh        chan struct{}
-	stoppedCh     chan struct{}
-	stopOnce      sync.Once
-	stuckDuration time.Duration // How long before a processing message is considered stuck
+	collection *mongo.Collection
+	transport  transport.Transport
+	opts       *options
+	logger     *slog.Logger
+	stopCh     chan struct{}
+	stoppedCh  chan struct{}
+	stopOnce   sync.Once
 }
 
 // NewMongoScheduler creates a new MongoDB-based scheduler.
@@ -128,17 +129,17 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 	}
 
 	return &MongoScheduler{
-		collection:    db.Collection(o.collection),
-		transport:     t,
-		opts:          o,
-		logger:        o.logger.With("component", "scheduler.mongodb"),
-		stopCh:        make(chan struct{}),
-		stoppedCh:     make(chan struct{}),
-		stuckDuration: o.stuckDuration,
+		collection: db.Collection(o.collection),
+		transport:  t,
+		opts:       o,
+		logger:     o.logger.With("component", "scheduler.mongodb"),
+		stopCh:     make(chan struct{}),
+		stoppedCh:  make(chan struct{}),
 	}, nil
 }
 
-// Collection returns the underlying MongoDB collection
+// collection returns the underlying MongoDB collection for use in tests.
+// Exported as a method primarily for integration test cleanup (e.g., dropping the collection).
 func (s *MongoScheduler) Collection() *mongo.Collection {
 	return s.collection
 }
@@ -175,6 +176,12 @@ func (s *MongoScheduler) EnsureIndexes(ctx context.Context) error {
 
 // Schedule adds a message for future delivery
 func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
+	if msg.EventName == "" {
+		return fmt.Errorf("schedule: event name must not be empty")
+	}
+	if msg.ScheduledAt.IsZero() {
+		return fmt.Errorf("schedule: scheduled_at must not be zero")
+	}
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
 	}
@@ -208,6 +215,10 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 
 // Cancel cancels a scheduled message
 func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("cancel: id must not be empty")
+	}
+
 	// First, get the message to record the event name for metrics
 	var eventName string
 	if s.opts.metrics != nil {
@@ -240,12 +251,16 @@ func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
 
 // Get retrieves a scheduled message by ID
 func (s *MongoScheduler) Get(ctx context.Context, id string) (*Message, error) {
+	if id == "" {
+		return nil, fmt.Errorf("get: id must not be empty")
+	}
+
 	filter := bson.M{"_id": id}
 
 	var mongoMsg mongoMessage
 	err := s.collection.FindOne(ctx, filter).Decode(&mongoMsg)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 		}
 		return nil, fmt.Errorf("find: %w", err)
@@ -399,7 +414,7 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 
 		msg, err := s.claimDue(ctx, now)
 		if err != nil {
-			if err == mongo.ErrNoDocuments {
+			if errors.Is(err, mongo.ErrNoDocuments) {
 				break // No more due messages
 			}
 			s.logger.Error("failed to claim due message", "error", err)
@@ -536,7 +551,7 @@ func (s *MongoScheduler) deleteClaimed(ctx context.Context, id string) error {
 // recoverStuck moves messages stuck in "processing" back to "pending".
 // This handles scheduler crashes where messages were claimed but never published.
 func (s *MongoScheduler) recoverStuck(ctx context.Context) {
-	cutoff := time.Now().Add(-s.stuckDuration)
+	cutoff := time.Now().Add(-s.opts.stuckDuration)
 	filter := bson.M{
 		"status":     statusProcessing,
 		"claimed_at": bson.M{"$lt": cutoff},
@@ -564,7 +579,7 @@ func (s *MongoScheduler) recoverStuck(ctx context.Context) {
 
 		s.logger.Warn("recovered stuck scheduled messages",
 			"count", result.ModifiedCount,
-			"stuck_duration", s.stuckDuration)
+			"stuck_duration", s.opts.stuckDuration)
 	}
 }
 
@@ -624,7 +639,7 @@ func (s *MongoScheduler) CountProcessing(ctx context.Context) (int64, error) {
 // CountStuck returns the number of messages stuck in processing (older than stuckDuration).
 // This is useful for monitoring and metrics.
 func (s *MongoScheduler) CountStuck(ctx context.Context) (int64, error) {
-	cutoff := time.Now().Add(-s.stuckDuration)
+	cutoff := time.Now().Add(-s.opts.stuckDuration)
 	filter := bson.M{
 		"status":     statusProcessing,
 		"claimed_at": bson.M{"$lt": cutoff},

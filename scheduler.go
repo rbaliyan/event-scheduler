@@ -142,43 +142,6 @@ type Scheduler interface {
 // to provide health check capabilities for monitoring and readiness probes.
 type HealthChecker = health.Checker
 
-// NewHealthResult creates a health result with scheduler-specific details.
-// This is a helper for creating health results with pending/stuck message counts.
-func NewHealthResult(status health.Status, message string, latency time.Duration, pending, stuck int64) *health.Result {
-	return &health.Result{
-		Status:    status,
-		Message:   message,
-		Latency:   latency,
-		CheckedAt: time.Now(),
-		Details: map[string]any{
-			"pending_messages": pending,
-			"stuck_messages":   stuck,
-		},
-	}
-}
-
-// HealthPendingMessages extracts the pending message count from a health result.
-func HealthPendingMessages(r *health.Result) int64 {
-	if r == nil || r.Details == nil {
-		return 0
-	}
-	if v, ok := r.Details["pending_messages"].(int64); ok {
-		return v
-	}
-	return 0
-}
-
-// HealthStuckMessages extracts the stuck message count from a health result.
-func HealthStuckMessages(r *health.Result) int64 {
-	if r == nil || r.Details == nil {
-		return 0
-	}
-	if v, ok := r.Details["stuck_messages"].(int64); ok {
-		return v
-	}
-	return 0
-}
-
 // Filter specifies criteria for listing scheduled messages.
 //
 // All fields are optional. Empty filter returns all messages.
