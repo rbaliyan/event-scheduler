@@ -89,6 +89,10 @@ func NewHandler(ctx context.Context, grpcAddr string, opts ...Option) (*Handler,
 // without going through a network connection. This is more efficient
 // when the gRPC service and HTTP gateway run in the same process.
 func NewInProcessHandler(ctx context.Context, svc schedulerpb.SchedulerServiceServer, opts ...Option) (*Handler, error) {
+	if svc == nil {
+		return nil, errors.New("gateway: service must not be nil")
+	}
+
 	o := &options{}
 	for _, opt := range opts {
 		opt(o)

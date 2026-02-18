@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -190,7 +191,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 		&msg.RetryCount,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 	if err != nil {
