@@ -488,6 +488,11 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 			"event", msg.EventName)
 	}
 
+	if err := rows.Err(); err != nil {
+		s.logger.Error("failed to iterate rows", "error", err)
+		return 0
+	}
+
 	// Delete delivered messages
 	if len(toDelete) > 0 {
 		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table)
