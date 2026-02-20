@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -22,17 +23,18 @@ MongoDB Schema:
 Collection: scheduled_messages
 
 Document structure:
-{
-    "_id": string (message ID),
-    "event_name": string,
-    "payload": Binary,
-    "metadata": object,
-    "scheduled_at": ISODate,
-    "created_at": ISODate,
-    "status": string (pending/processing),
-    "claimed_at": ISODate (optional, set when processing),
-    "retry_count": int (0 by default)
-}
+
+	{
+	    "_id": string (message ID),
+	    "event_name": string,
+	    "payload": Binary,
+	    "metadata": object,
+	    "scheduled_at": ISODate,
+	    "created_at": ISODate,
+	    "status": string (pending/processing),
+	    "claimed_at": ISODate (optional, set when processing),
+	    "retry_count": int (0 by default)
+	}
 
 Indexes:
 db.scheduled_messages.createIndex({ "scheduled_at": 1 })
@@ -40,32 +42,32 @@ db.scheduled_messages.createIndex({ "event_name": 1 })
 db.scheduled_messages.createIndex({ "status": 1, "scheduled_at": 1 })
 */
 
-// SchedulerStatus represents the state of a scheduled message
-type SchedulerStatus string
+// schedulerStatus represents the state of a scheduled message
+type schedulerStatus string
 
 const (
-	// SchedulerStatusPending indicates the message is waiting to be delivered
-	SchedulerStatusPending SchedulerStatus = "pending"
+	// statusPending indicates the message is waiting to be delivered
+	statusPending schedulerStatus = "pending"
 
-	// SchedulerStatusProcessing indicates the message is claimed by a scheduler
-	SchedulerStatusProcessing SchedulerStatus = "processing"
+	// statusProcessing indicates the message is claimed by a scheduler
+	statusProcessing schedulerStatus = "processing"
 )
 
-// MongoMessage represents a scheduled message document in MongoDB
-type MongoMessage struct {
+// mongoMessage represents a scheduled message document in MongoDB
+type mongoMessage struct {
 	ID          string            `bson:"_id"`
 	EventName   string            `bson:"event_name"`
 	Payload     []byte            `bson:"payload"`
 	Metadata    map[string]string `bson:"metadata,omitempty"`
 	ScheduledAt time.Time         `bson:"scheduled_at"`
 	CreatedAt   time.Time         `bson:"created_at"`
-	Status      SchedulerStatus   `bson:"status,omitempty"`
+	Status      schedulerStatus   `bson:"status,omitempty"`
 	ClaimedAt   *time.Time        `bson:"claimed_at,omitempty"`
 	RetryCount  int               `bson:"retry_count,omitempty"`
 }
 
-// ToMessage converts MongoMessage to Message
-func (m *MongoMessage) ToMessage() *Message {
+// toMessage converts mongoMessage to Message
+func (m *mongoMessage) toMessage() *Message {
 	return &Message{
 		ID:          m.ID,
 		EventName:   m.EventName,
@@ -77,9 +79,9 @@ func (m *MongoMessage) ToMessage() *Message {
 	}
 }
 
-// FromMessage creates a MongoMessage from Message
-func FromSchedulerMessage(m *Message) *MongoMessage {
-	return &MongoMessage{
+// fromMessage creates a mongoMessage from Message
+func fromMessage(m *Message) *mongoMessage {
+	return &mongoMessage{
 		ID:          m.ID,
 		EventName:   m.EventName,
 		Payload:     m.Payload,
@@ -92,14 +94,13 @@ func FromSchedulerMessage(m *Message) *MongoMessage {
 
 // MongoScheduler uses MongoDB for scheduling
 type MongoScheduler struct {
-	collection    *mongo.Collection
-	transport     transport.Transport
-	opts          *options
-	logger        *slog.Logger
-	stopCh        chan struct{}
-	stoppedCh     chan struct{}
-	stopOnce      sync.Once
-	stuckDuration time.Duration // How long before a processing message is considered stuck
+	collection *mongo.Collection
+	transport  transport.Transport
+	opts       *options
+	logger     *slog.Logger
+	stopCh     chan struct{}
+	stoppedCh  chan struct{}
+	stopOnce   sync.Once
 }
 
 // NewMongoScheduler creates a new MongoDB-based scheduler.
@@ -128,17 +129,17 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 	}
 
 	return &MongoScheduler{
-		collection:    db.Collection(o.collection),
-		transport:     t,
-		opts:          o,
-		logger:        o.logger.With("component", "scheduler.mongodb"),
-		stopCh:        make(chan struct{}),
-		stoppedCh:     make(chan struct{}),
-		stuckDuration: o.stuckDuration,
+		collection: db.Collection(o.collection),
+		transport:  t,
+		opts:       o,
+		logger:     o.logger.With("component", "scheduler.mongodb"),
+		stopCh:     make(chan struct{}),
+		stoppedCh:  make(chan struct{}),
 	}, nil
 }
 
-// Collection returns the underlying MongoDB collection
+// collection returns the underlying MongoDB collection for use in tests.
+// Exported as a method primarily for integration test cleanup (e.g., dropping the collection).
 func (s *MongoScheduler) Collection() *mongo.Collection {
 	return s.collection
 }
@@ -175,6 +176,12 @@ func (s *MongoScheduler) EnsureIndexes(ctx context.Context) error {
 
 // Schedule adds a message for future delivery
 func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
+	if msg.EventName == "" {
+		return fmt.Errorf("schedule: event name must not be empty")
+	}
+	if msg.ScheduledAt.IsZero() {
+		return fmt.Errorf("schedule: scheduled_at must not be zero")
+	}
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
 	}
@@ -182,8 +189,8 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 		msg.CreatedAt = time.Now()
 	}
 
-	mongoMsg := FromSchedulerMessage(&msg)
-	mongoMsg.Status = SchedulerStatusPending
+	mongoMsg := fromMessage(&msg)
+	mongoMsg.Status = statusPending
 
 	_, err := s.collection.InsertOne(ctx, mongoMsg)
 	if err != nil {
@@ -208,10 +215,14 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 
 // Cancel cancels a scheduled message
 func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("cancel: id must not be empty")
+	}
+
 	// First, get the message to record the event name for metrics
 	var eventName string
 	if s.opts.metrics != nil {
-		var mongoMsg MongoMessage
+		var mongoMsg mongoMessage
 		err := s.collection.FindOne(ctx, bson.M{"_id": id}).Decode(&mongoMsg)
 		if err == nil {
 			eventName = mongoMsg.EventName
@@ -240,18 +251,22 @@ func (s *MongoScheduler) Cancel(ctx context.Context, id string) error {
 
 // Get retrieves a scheduled message by ID
 func (s *MongoScheduler) Get(ctx context.Context, id string) (*Message, error) {
+	if id == "" {
+		return nil, fmt.Errorf("get: id must not be empty")
+	}
+
 	filter := bson.M{"_id": id}
 
-	var mongoMsg MongoMessage
+	var mongoMsg mongoMessage
 	err := s.collection.FindOne(ctx, filter).Decode(&mongoMsg)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 		}
 		return nil, fmt.Errorf("find: %w", err)
 	}
 
-	return mongoMsg.ToMessage(), nil
+	return mongoMsg.toMessage(), nil
 }
 
 // List returns scheduled messages
@@ -289,11 +304,11 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 
 	var messages []*Message
 	for cursor.Next(ctx) {
-		var mongoMsg MongoMessage
+		var mongoMsg mongoMessage
 		if err := cursor.Decode(&mongoMsg); err != nil {
 			return nil, fmt.Errorf("decode: %w", err)
 		}
-		messages = append(messages, mongoMsg.ToMessage())
+		messages = append(messages, mongoMsg.toMessage())
 	}
 
 	return messages, cursor.Err()
@@ -399,7 +414,7 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 
 		msg, err := s.claimDue(ctx, now)
 		if err != nil {
-			if err == mongo.ErrNoDocuments {
+			if errors.Is(err, mongo.ErrNoDocuments) {
 				break // No more due messages
 			}
 			s.logger.Error("failed to claim due message", "error", err)
@@ -461,7 +476,7 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 			// Update document: reset status to pending, increment retry_count, set new scheduled_at
 			_, updateErr := s.collection.UpdateByID(ctx, msg.ID, bson.M{
 				"$set": bson.M{
-					"status":       SchedulerStatusPending,
+					"status":       statusPending,
 					"retry_count":  newRetryCount,
 					"scheduled_at": nextRetryAt,
 				},
@@ -503,14 +518,14 @@ func (s *MongoScheduler) claimDue(ctx context.Context, now time.Time) (*Message,
 	filter := bson.M{
 		"scheduled_at": bson.M{"$lte": now},
 		"$or": []bson.M{
-			{"status": SchedulerStatusPending},
+			{"status": statusPending},
 			{"status": bson.M{"$exists": false}}, // Backward compat: no status = pending
 		},
 	}
 	claimedAt := time.Now()
 	update := bson.M{
 		"$set": bson.M{
-			"status":     SchedulerStatusProcessing,
+			"status":     statusProcessing,
 			"claimed_at": claimedAt,
 		},
 	}
@@ -518,13 +533,13 @@ func (s *MongoScheduler) claimDue(ctx context.Context, now time.Time) (*Message,
 		SetSort(bson.D{{Key: "scheduled_at", Value: 1}}).
 		SetReturnDocument(mongoopts.After)
 
-	var mongoMsg MongoMessage
+	var mongoMsg mongoMessage
 	err := s.collection.FindOneAndUpdate(ctx, filter, update, opts).Decode(&mongoMsg)
 	if err != nil {
 		return nil, err
 	}
 
-	return mongoMsg.ToMessage(), nil
+	return mongoMsg.toMessage(), nil
 }
 
 // deleteClaimed deletes a message that was successfully published
@@ -536,14 +551,14 @@ func (s *MongoScheduler) deleteClaimed(ctx context.Context, id string) error {
 // recoverStuck moves messages stuck in "processing" back to "pending".
 // This handles scheduler crashes where messages were claimed but never published.
 func (s *MongoScheduler) recoverStuck(ctx context.Context) {
-	cutoff := time.Now().Add(-s.stuckDuration)
+	cutoff := time.Now().Add(-s.opts.stuckDuration)
 	filter := bson.M{
-		"status":     SchedulerStatusProcessing,
+		"status":     statusProcessing,
 		"claimed_at": bson.M{"$lt": cutoff},
 	}
 	update := bson.M{
 		"$set": bson.M{
-			"status": SchedulerStatusPending,
+			"status": statusPending,
 		},
 		"$unset": bson.M{
 			"claimed_at": "",
@@ -564,7 +579,7 @@ func (s *MongoScheduler) recoverStuck(ctx context.Context) {
 
 		s.logger.Warn("recovered stuck scheduled messages",
 			"count", result.ModifiedCount,
-			"stuck_duration", s.stuckDuration)
+			"stuck_duration", s.opts.stuckDuration)
 	}
 }
 
@@ -607,7 +622,7 @@ func (s *MongoScheduler) DeleteOlderThan(ctx context.Context, age time.Duration)
 func (s *MongoScheduler) CountPending(ctx context.Context) (int64, error) {
 	filter := bson.M{
 		"$or": []bson.M{
-			{"status": SchedulerStatusPending},
+			{"status": statusPending},
 			{"status": bson.M{"$exists": false}}, // Backward compat: no status = pending
 		},
 	}
@@ -617,16 +632,16 @@ func (s *MongoScheduler) CountPending(ctx context.Context) (int64, error) {
 // CountProcessing returns the number of messages currently being processed.
 // This is useful for monitoring and metrics.
 func (s *MongoScheduler) CountProcessing(ctx context.Context) (int64, error) {
-	filter := bson.M{"status": SchedulerStatusProcessing}
+	filter := bson.M{"status": statusProcessing}
 	return s.collection.CountDocuments(ctx, filter)
 }
 
 // CountStuck returns the number of messages stuck in processing (older than stuckDuration).
 // This is useful for monitoring and metrics.
 func (s *MongoScheduler) CountStuck(ctx context.Context) (int64, error) {
-	cutoff := time.Now().Add(-s.stuckDuration)
+	cutoff := time.Now().Add(-s.opts.stuckDuration)
 	filter := bson.M{
-		"status":     SchedulerStatusProcessing,
+		"status":     statusProcessing,
 		"claimed_at": bson.M{"$lt": cutoff},
 	}
 	return s.collection.CountDocuments(ctx, filter)
@@ -671,42 +686,42 @@ func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
 //   - Counts pending messages
 //   - Counts stuck messages (if any)
 //
-// Returns HealthStatusHealthy if MongoDB is responsive and no stuck messages.
-// Returns HealthStatusDegraded if stuck messages exist.
-// Returns HealthStatusUnhealthy if MongoDB is not responsive.
+// Returns health.StatusHealthy if MongoDB is responsive and no stuck messages.
+// Returns health.StatusDegraded if stuck messages exist.
+// Returns health.StatusUnhealthy if MongoDB is not responsive.
 func (s *MongoScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
 
 	// Ping MongoDB
 	if err := s.collection.Database().Client().Ping(ctx, nil); err != nil {
 		return &health.Result{
-			Status:    HealthStatusUnhealthy,
+			Status:    health.StatusUnhealthy,
 			Message:   fmt.Sprintf("mongodb ping failed: %v", err),
 			Latency:   time.Since(start),
 			CheckedAt: start,
 		}
 	}
 
-	status := HealthStatusHealthy
+	status := health.StatusHealthy
 	var message string
 
 	// Count pending messages
 	pending, err := s.CountPending(ctx)
 	if err != nil {
-		status = HealthStatusDegraded
+		status = health.StatusDegraded
 		message = fmt.Sprintf("failed to count pending: %v", err)
 	}
 
 	// Count stuck messages
 	stuck, err := s.CountStuck(ctx)
 	if err != nil {
-		status = HealthStatusDegraded
+		status = health.StatusDegraded
 		message = fmt.Sprintf("failed to count stuck: %v", err)
 	}
 
 	// Degraded if stuck messages exist
-	if stuck > 0 && status == HealthStatusHealthy {
-		status = HealthStatusDegraded
+	if stuck > 0 && status == health.StatusHealthy {
+		status = health.StatusDegraded
 		message = fmt.Sprintf("%d messages stuck in processing", stuck)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -81,6 +82,12 @@ func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) (*P
 
 // Schedule adds a message for future delivery
 func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
+	if msg.EventName == "" {
+		return fmt.Errorf("schedule: event name must not be empty")
+	}
+	if msg.ScheduledAt.IsZero() {
+		return fmt.Errorf("schedule: scheduled_at must not be zero")
+	}
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
 	}
@@ -127,6 +134,10 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 
 // Cancel cancels a scheduled message
 func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("cancel: id must not be empty")
+	}
+
 	// First, get the event name for metrics if enabled
 	var eventName string
 	if s.opts.metrics != nil {
@@ -157,6 +168,10 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 
 // Get retrieves a scheduled message by ID
 func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error) {
+	if id == "" {
+		return nil, fmt.Errorf("get: id must not be empty")
+	}
+
 	query := fmt.Sprintf(`
 		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
@@ -176,7 +191,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 		&msg.RetryCount,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%s: %w", id, ErrNotFound)
 	}
 	if err != nil {
@@ -259,6 +274,10 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 		}
 
 		messages = append(messages, &msg)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
 
 	return messages, nil
@@ -469,6 +488,11 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 			"event", msg.EventName)
 	}
 
+	if err := rows.Err(); err != nil {
+		s.logger.Error("failed to iterate rows", "error", err)
+		return 0
+	}
+
 	// Delete delivered messages
 	if len(toDelete) > 0 {
 		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table)
@@ -588,15 +612,15 @@ func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
 // Note: PostgreSQL scheduler uses FOR UPDATE SKIP LOCKED, so there's no
 // separate "stuck" state. Messages are atomically locked within transactions.
 //
-// Returns HealthStatusHealthy if PostgreSQL is responsive.
-// Returns HealthStatusUnhealthy if PostgreSQL is not responsive.
+// Returns health.StatusHealthy if PostgreSQL is responsive.
+// Returns health.StatusUnhealthy if PostgreSQL is not responsive.
 func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
 
 	// Ping PostgreSQL
 	if err := s.db.PingContext(ctx); err != nil {
 		return &health.Result{
-			Status:    HealthStatusUnhealthy,
+			Status:    health.StatusUnhealthy,
 			Message:   fmt.Sprintf("postgres ping failed: %v", err),
 			Latency:   time.Since(start),
 			CheckedAt: start,
@@ -606,9 +630,9 @@ func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	// Count pending messages
 	pending, err := s.CountPending(ctx)
 	message := ""
-	status := HealthStatusHealthy
+	status := health.StatusHealthy
 	if err != nil {
-		status = HealthStatusDegraded
+		status = health.StatusDegraded
 		message = fmt.Sprintf("failed to count pending: %v", err)
 	}
 

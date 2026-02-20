@@ -399,7 +399,7 @@ func TestMongo_Integration_StuckRecovery(t *testing.T) {
 		"metadata":     bson.M{"test": "true"},
 		"scheduled_at": time.Now().Add(-time.Minute),
 		"created_at":   time.Now().Add(-time.Minute),
-		"status":       string(SchedulerStatusProcessing),
+		"status":       "processing",
 		"claimed_at":   oldTime,
 		"retry_count":  0,
 	}
