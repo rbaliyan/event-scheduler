@@ -257,6 +257,7 @@ func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 	for _, result := range results {
 		var msg Message
 		if err := json.Unmarshal([]byte(result), &msg); err != nil {
+			slog.Warn("skipping corrupt message in list", "error", err)
 			continue
 		}
 
@@ -469,8 +470,12 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 		}
 
 		// Remove from processing set and index after successful publish
-		s.client.ZRem(ctx, s.processingKey(), member)
-		s.client.HDel(ctx, s.indexKey(), msg.ID)
+		pipe := s.client.Pipeline()
+		pipe.ZRem(ctx, s.processingKey(), member)
+		pipe.HDel(ctx, s.indexKey(), msg.ID)
+		if _, err := pipe.Exec(ctx); err != nil {
+			slog.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
+		}
 
 		// Record delivery metrics
 		if s.opts.metrics != nil {

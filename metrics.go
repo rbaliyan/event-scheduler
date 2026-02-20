@@ -248,6 +248,9 @@ func NewMetrics(opts ...MetricsOption) (*Metrics, error) {
 //	    return count
 //	})
 func (m *Metrics) SetPendingCallback(fn func() int64) {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pendingCallback = fn
@@ -256,6 +259,9 @@ func (m *Metrics) SetPendingCallback(fn func() int64) {
 // SetStuckCallback sets the callback function for the stuck messages gauge.
 // The callback is called on each metrics collection to get the current count.
 func (m *Metrics) SetStuckCallback(fn func() int64) {
+	if m == nil {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stuckCallback = fn
@@ -267,6 +273,9 @@ func (m *Metrics) SetStuckCallback(fn func() int64) {
 //   - ctx: context for the operation
 //   - eventName: the event name for the scheduled message
 func (m *Metrics) RecordScheduled(ctx context.Context, eventName string) {
+	if m == nil {
+		return
+	}
 	m.scheduledTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event", eventName),
 	))
@@ -280,6 +289,9 @@ func (m *Metrics) RecordScheduled(ctx context.Context, eventName string) {
 //   - scheduledAt: when the message was originally scheduled for
 //   - processingStart: when processing of this message started
 func (m *Metrics) RecordDelivered(ctx context.Context, eventName string, scheduledAt time.Time, processingStart time.Time) {
+	if m == nil {
+		return
+	}
 	now := time.Now()
 
 	m.deliveredTotal.Add(ctx, 1, metric.WithAttributes(
@@ -312,6 +324,9 @@ func (m *Metrics) RecordDelivered(ctx context.Context, eventName string, schedul
 //   - eventName: the event name of the failed message
 //   - reason: short description of the failure reason
 func (m *Metrics) RecordFailed(ctx context.Context, eventName string, reason string) {
+	if m == nil {
+		return
+	}
 	m.failedTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event", eventName),
 		attribute.String("reason", reason),
@@ -324,6 +339,9 @@ func (m *Metrics) RecordFailed(ctx context.Context, eventName string, reason str
 //   - ctx: context for the operation
 //   - eventName: the event name of the cancelled message (empty string if unknown)
 func (m *Metrics) RecordCancelled(ctx context.Context, eventName string) {
+	if m == nil {
+		return
+	}
 	attrs := []attribute.KeyValue{}
 	if eventName != "" {
 		attrs = append(attrs, attribute.String("event", eventName))
@@ -337,6 +355,9 @@ func (m *Metrics) RecordCancelled(ctx context.Context, eventName string) {
 //   - ctx: context for the operation
 //   - count: number of messages recovered
 func (m *Metrics) RecordRecovered(ctx context.Context, count int64) {
+	if m == nil {
+		return
+	}
 	if count > 0 {
 		m.recoveredTotal.Add(ctx, count)
 	}
@@ -344,6 +365,9 @@ func (m *Metrics) RecordRecovered(ctx context.Context, count int64) {
 
 // RecordDLQSent records that a message was sent to the dead-letter queue.
 func (m *Metrics) RecordDLQSent(ctx context.Context, eventName string) {
+	if m == nil {
+		return
+	}
 	m.dlqSentTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event", eventName),
 	))
@@ -352,6 +376,9 @@ func (m *Metrics) RecordDLQSent(ctx context.Context, eventName string) {
 // Close unregisters the metrics callbacks.
 // Call this when the scheduler is stopped to clean up resources.
 func (m *Metrics) Close() error {
+	if m == nil {
+		return nil
+	}
 	if m.registration != nil {
 		return m.registration.Unregister()
 	}
