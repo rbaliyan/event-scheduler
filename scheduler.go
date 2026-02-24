@@ -81,22 +81,22 @@ var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 type Message struct {
 	// ID is a unique identifier for the message.
 	// Used for cancellation and deduplication.
-	ID string
+	ID string `json:"id"`
 
 	// EventName is the event/topic to publish to when delivered.
-	EventName string
+	EventName string `json:"event_name"`
 
 	// Payload is the message data (typically JSON).
-	Payload []byte
+	Payload []byte `json:"payload,omitempty"`
 
 	// Metadata contains additional key-value pairs for the message.
-	Metadata map[string]string
+	Metadata map[string]string `json:"metadata,omitempty"`
 
 	// ScheduledAt is when the message should be delivered.
-	ScheduledAt time.Time
+	ScheduledAt time.Time `json:"scheduled_at"`
 
 	// CreatedAt is when the message was scheduled.
-	CreatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
 
 	// RetryCount tracks the number of delivery attempts.
 	// This is used internally for backoff calculations.
@@ -168,68 +168,6 @@ type Filter struct {
 	Limit int
 }
 
-// FilterBuilder provides a fluent API for constructing Filter queries.
-//
-// Example:
-//
-//	filter := scheduler.NewFilterBuilder().
-//	    ForEvent("orders.reminder").
-//	    Before(time.Now().Add(time.Hour)).
-//	    After(time.Now()).
-//	    WithLimit(100).
-//	    Build()
-type FilterBuilder struct {
-	filter Filter
-}
-
-// NewFilterBuilder creates a new filter builder.
-func NewFilterBuilder() *FilterBuilder {
-	return &FilterBuilder{}
-}
-
-// ForEvent filters by event name.
-func (b *FilterBuilder) ForEvent(name string) *FilterBuilder {
-	b.filter.EventName = name
-	return b
-}
-
-// Before filters messages scheduled before the given time.
-func (b *FilterBuilder) Before(t time.Time) *FilterBuilder {
-	b.filter.Before = t
-	return b
-}
-
-// After filters messages scheduled after the given time.
-func (b *FilterBuilder) After(t time.Time) *FilterBuilder {
-	b.filter.After = t
-	return b
-}
-
-// InTimeRange filters messages scheduled between start and end times.
-func (b *FilterBuilder) InTimeRange(start, end time.Time) *FilterBuilder {
-	b.filter.After = start
-	b.filter.Before = end
-	return b
-}
-
-// DueWithin filters messages scheduled within the given duration from now.
-func (b *FilterBuilder) DueWithin(d time.Duration) *FilterBuilder {
-	b.filter.After = time.Now()
-	b.filter.Before = time.Now().Add(d)
-	return b
-}
-
-// WithLimit sets the maximum number of results.
-func (b *FilterBuilder) WithLimit(limit int) *FilterBuilder {
-	b.filter.Limit = limit
-	return b
-}
-
-// Build returns the constructed filter.
-func (b *FilterBuilder) Build() Filter {
-	return b.filter
-}
-
 // BackoffStrategy is an alias for backoff.Strategy from the main event library.
 // All implementations from github.com/rbaliyan/event/v3/backoff can be used directly.
 //
@@ -247,6 +185,24 @@ type Resetter interface {
 	Reset()
 }
 
+// DLQStoreParams contains the parameters for storing a failed message in the DLQ.
+type DLQStoreParams struct {
+	// EventName is the name of the event that failed.
+	EventName string
+	// OriginalID is the original message ID.
+	OriginalID string
+	// Payload is the message payload.
+	Payload []byte
+	// Metadata contains additional message metadata.
+	Metadata map[string]string
+	// Err is the error that caused the failure.
+	Err error
+	// RetryCount is the number of retries attempted.
+	RetryCount int
+	// Source is the source service identifier.
+	Source string
+}
+
 // DeadLetterQueue defines the interface for dead-letter queue storage.
 // This provides loose coupling so the scheduler doesn't depend directly
 // on the dlq package. The dlq.Manager from github.com/rbaliyan/event-dlq
@@ -255,7 +211,7 @@ type Resetter interface {
 // Implementations must be safe for concurrent use.
 type DeadLetterQueue interface {
 	// Store adds a failed message to the dead-letter queue.
-	Store(ctx context.Context, eventName, originalID string, payload []byte, metadata map[string]string, err error, retryCount int, source string) error
+	Store(ctx context.Context, params DLQStoreParams) error
 }
 
 // options configures the scheduler behavior.

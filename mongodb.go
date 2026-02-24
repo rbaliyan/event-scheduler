@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,19 +139,14 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 	}, nil
 }
 
-// collection returns the underlying MongoDB collection for use in tests.
-// Exported as a method primarily for integration test cleanup (e.g., dropping the collection).
+// Collection returns the underlying MongoDB collection.
+// Use this if you need direct access for operational tasks (e.g., dropping in tests).
 func (s *MongoScheduler) Collection() *mongo.Collection {
 	return s.collection
 }
 
-// Indexes returns the required indexes for the scheduler collection.
-// Users can use this to create indexes manually or merge with their own indexes.
-//
-// Example:
-//
-//	indexes := scheduler.Indexes()
-//	_, err := collection.Indexes().CreateMany(ctx, indexes)
+// Indexes returns the required index models for the scheduler collection.
+// Use this if you prefer to manage indexes separately (e.g., via migrations).
 func (s *MongoScheduler) Indexes() []mongo.IndexModel {
 	return []mongo.IndexModel{
 		{
@@ -168,7 +164,8 @@ func (s *MongoScheduler) Indexes() []mongo.IndexModel {
 	}
 }
 
-// EnsureIndexes creates the required indexes for the scheduler collection
+// EnsureIndexes creates the required indexes for the scheduler collection.
+// Call this once during application startup.
 func (s *MongoScheduler) EnsureIndexes(ctx context.Context) error {
 	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
 	return err
@@ -322,59 +319,22 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 // - Decreases when messages are found (more activity expected)
 // - Increases when no messages are found (less activity expected)
 func (s *MongoScheduler) Start(ctx context.Context) error {
-	currentInterval := s.opts.pollInterval
-	ticker := time.NewTicker(currentInterval)
-	defer ticker.Stop()
+	s.setupMetricsCallbacks(ctx)
 
-	// Recovery ticker for stuck messages (check every minute)
-	recoveryTicker := time.NewTicker(time.Minute)
-	defer recoveryTicker.Stop()
+	runSchedulerLoop(
+		s.logger,
+		s.opts,
+		ctx.Done(),
+		s.stopCh,
+		func() int { return s.processDue(ctx) },
+		func() { s.recoverStuck(ctx) },
+		func() { close(s.stoppedCh) },
+	)
 
-	// Initialize adaptive polling state if enabled
-	var adaptiveState *adaptivePollState
-	if s.opts.adaptivePolling {
-		adaptiveState = newAdaptivePollState(
-			s.opts.pollInterval,
-			s.opts.minPollInterval,
-			s.opts.maxPollInterval,
-		)
-		s.logger.Info("scheduler started with adaptive polling",
-			"initial_interval", s.opts.pollInterval,
-			"min_interval", s.opts.minPollInterval,
-			"max_interval", s.opts.maxPollInterval,
-			"batch_size", s.opts.batchSize)
-	} else {
-		s.logger.Info("scheduler started",
-			"poll_interval", s.opts.pollInterval,
-			"batch_size", s.opts.batchSize)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-
-	// Recover any stuck messages at startup
-	s.recoverStuck(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			close(s.stoppedCh)
-			return ctx.Err()
-		case <-s.stopCh:
-			close(s.stoppedCh)
-			return nil
-		case <-ticker.C:
-			processed := s.processDue(ctx)
-
-			// Adjust poll interval if adaptive polling is enabled
-			if adaptiveState != nil {
-				newInterval := adaptiveState.adjust(processed)
-				if newInterval != currentInterval {
-					currentInterval = newInterval
-					ticker.Reset(currentInterval)
-				}
-			}
-		case <-recoveryTicker.C:
-			s.recoverStuck(ctx)
-		}
-	}
+	return nil
 }
 
 // Stop gracefully stops the scheduler
@@ -429,30 +389,8 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 				"error", publishErr,
 				"retry_count", msg.RetryCount)
 
-			// Record failure metrics
-			if s.opts.metrics != nil {
-				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
-			}
-
-			// Check if max retries exceeded
-			if s.opts.maxRetries > 0 && msg.RetryCount >= s.opts.maxRetries {
-				s.logger.Error("scheduled message exceeded max retries, discarding",
-					"id", msg.ID,
-					"event", msg.EventName,
-					"retry_count", msg.RetryCount,
-					"max_retries", s.opts.maxRetries)
-
-				// Send to DLQ if configured
-				if s.opts.dlq != nil {
-					if dlqErr := s.opts.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, publishErr, msg.RetryCount, "scheduler"); dlqErr != nil {
-						s.logger.Error("failed to send message to DLQ",
-							"id", msg.ID,
-							"error", dlqErr)
-					} else if s.opts.metrics != nil {
-						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
-					}
-				}
-
+			decision := handleDeliveryFailure(ctx, s.opts, msg, publishErr, s.logger)
+			if decision.sendToDLQ {
 				// Delete the message
 				if err := s.deleteClaimed(ctx, msg.ID); err != nil {
 					s.logger.Error("failed to delete claimed message", "id", msg.ID, "error", err)
@@ -460,25 +398,12 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 				continue
 			}
 
-			// Increment retry count and calculate next retry time
-			newRetryCount := msg.RetryCount + 1
-			nextRetryAt := time.Now()
-			if s.opts.backoff != nil {
-				backoffDelay := s.opts.backoff.NextDelay(newRetryCount - 1)
-				nextRetryAt = nextRetryAt.Add(backoffDelay)
-				s.logger.Debug("scheduling retry with backoff",
-					"id", msg.ID,
-					"retry_count", newRetryCount,
-					"backoff_delay", backoffDelay,
-					"next_retry_at", nextRetryAt)
-			}
-
-			// Update document: reset status to pending, increment retry_count, set new scheduled_at
+			// Update document: reset status to pending, set new retry_count and scheduled_at
 			_, updateErr := s.collection.UpdateByID(ctx, msg.ID, bson.M{
 				"$set": bson.M{
 					"status":       statusPending,
-					"retry_count":  newRetryCount,
-					"scheduled_at": nextRetryAt,
+					"retry_count":  decision.retryCount,
+					"scheduled_at": decision.nextRetryAt,
 				},
 				"$unset": bson.M{
 					"claimed_at": "",
@@ -583,43 +508,8 @@ func (s *MongoScheduler) recoverStuck(ctx context.Context) {
 	}
 }
 
-// Count returns the number of scheduled messages
-func (s *MongoScheduler) Count(ctx context.Context) (int64, error) {
-	return s.collection.CountDocuments(ctx, bson.M{})
-}
-
-// CountByEvent returns the number of scheduled messages for a specific event
-func (s *MongoScheduler) CountByEvent(ctx context.Context, eventName string) (int64, error) {
-	filter := bson.M{"event_name": eventName}
-	return s.collection.CountDocuments(ctx, filter)
-}
-
-// CountDue returns the number of messages due for delivery
-func (s *MongoScheduler) CountDue(ctx context.Context) (int64, error) {
-	filter := bson.M{
-		"scheduled_at": bson.M{"$lte": time.Now()},
-	}
-	return s.collection.CountDocuments(ctx, filter)
-}
-
-// DeleteOlderThan removes messages older than the specified age (already delivered would be deleted)
-func (s *MongoScheduler) DeleteOlderThan(ctx context.Context, age time.Duration) (int64, error) {
-	cutoff := time.Now().Add(-age)
-	filter := bson.M{
-		"created_at": bson.M{"$lt": cutoff},
-	}
-
-	result, err := s.collection.DeleteMany(ctx, filter)
-	if err != nil {
-		return 0, fmt.Errorf("delete: %w", err)
-	}
-
-	return result.DeletedCount, nil
-}
-
-// CountPending returns the number of pending scheduled messages.
-// This is useful for monitoring and metrics.
-func (s *MongoScheduler) CountPending(ctx context.Context) (int64, error) {
+// countPending returns the number of pending scheduled messages.
+func (s *MongoScheduler) countPending(ctx context.Context) (int64, error) {
 	filter := bson.M{
 		"$or": []bson.M{
 			{"status": statusPending},
@@ -629,16 +519,8 @@ func (s *MongoScheduler) CountPending(ctx context.Context) (int64, error) {
 	return s.collection.CountDocuments(ctx, filter)
 }
 
-// CountProcessing returns the number of messages currently being processed.
-// This is useful for monitoring and metrics.
-func (s *MongoScheduler) CountProcessing(ctx context.Context) (int64, error) {
-	filter := bson.M{"status": statusProcessing}
-	return s.collection.CountDocuments(ctx, filter)
-}
-
-// CountStuck returns the number of messages stuck in processing (older than stuckDuration).
-// This is useful for monitoring and metrics.
-func (s *MongoScheduler) CountStuck(ctx context.Context) (int64, error) {
+// countStuck returns the number of messages stuck in processing (older than stuckDuration).
+func (s *MongoScheduler) countStuck(ctx context.Context) (int64, error) {
 	cutoff := time.Now().Add(-s.opts.stuckDuration)
 	filter := bson.M{
 		"status":     statusProcessing,
@@ -647,21 +529,15 @@ func (s *MongoScheduler) CountStuck(ctx context.Context) (int64, error) {
 	return s.collection.CountDocuments(ctx, filter)
 }
 
-// SetupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
+// setupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
 // This should be called after creating the scheduler if metrics are enabled.
-//
-// Example:
-//
-//	metrics, _ := scheduler.NewMetrics()
-//	s := scheduler.NewMongoScheduler(db, transport, scheduler.WithMetrics(metrics))
-//	s.SetupMetricsCallbacks(ctx)
-func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
+func (s *MongoScheduler) setupMetricsCallbacks(ctx context.Context) {
 	if s.opts.metrics == nil {
 		return
 	}
 
 	s.opts.metrics.SetPendingCallback(func() int64 {
-		count, err := s.CountPending(ctx)
+		count, err := s.countPending(ctx)
 		if err != nil {
 			s.logger.Error("failed to count pending messages for metrics", "error", err)
 			return 0
@@ -670,7 +546,7 @@ func (s *MongoScheduler) SetupMetricsCallbacks(ctx context.Context) {
 	})
 
 	s.opts.metrics.SetStuckCallback(func() int64 {
-		count, err := s.CountStuck(ctx)
+		count, err := s.countStuck(ctx)
 		if err != nil {
 			s.logger.Error("failed to count stuck messages for metrics", "error", err)
 			return 0
@@ -703,31 +579,31 @@ func (s *MongoScheduler) Health(ctx context.Context) *health.Result {
 	}
 
 	status := health.StatusHealthy
-	var message string
+	var messages []string
 
 	// Count pending messages
-	pending, err := s.CountPending(ctx)
+	pending, err := s.countPending(ctx)
 	if err != nil {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("failed to count pending: %v", err)
+		messages = append(messages, fmt.Sprintf("failed to count pending: %v", err))
 	}
 
 	// Count stuck messages
-	stuck, err := s.CountStuck(ctx)
+	stuck, err := s.countStuck(ctx)
 	if err != nil {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("failed to count stuck: %v", err)
+		messages = append(messages, fmt.Sprintf("failed to count stuck: %v", err))
 	}
 
 	// Degraded if stuck messages exist
 	if stuck > 0 && status == health.StatusHealthy {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("%d messages stuck in processing", stuck)
+		messages = append(messages, fmt.Sprintf("%d messages stuck in processing", stuck))
 	}
 
 	return &health.Result{
 		Status:    status,
-		Message:   message,
+		Message:   strings.Join(messages, "; "),
 		Latency:   time.Since(start),
 		CheckedAt: start,
 		Details: map[string]any{
