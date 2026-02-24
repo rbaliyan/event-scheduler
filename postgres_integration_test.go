@@ -299,7 +299,7 @@ func TestPostgres_Integration_MaxRetriesExceeded(t *testing.T) {
 	go sched.Start(ctx)
 
 	waitFor(t, 10*time.Second, func() bool {
-		count, _ := sched.CountPending(context.Background())
+		count, _ := sched.countPending(context.Background())
 		return count == 0
 	}, "message to be discarded after max retries")
 
@@ -371,7 +371,7 @@ func TestPostgres_Integration_DLQStoreFailure(t *testing.T) {
 	go sched.Start(ctx)
 
 	waitFor(t, 10*time.Second, func() bool {
-		count, _ := sched.CountPending(context.Background())
+		count, _ := sched.countPending(context.Background())
 		return count == 0
 	}, "message to be discarded after DLQ failure")
 }

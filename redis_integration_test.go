@@ -298,7 +298,7 @@ func TestRedis_Integration_MaxRetriesExceeded(t *testing.T) {
 
 	// Wait for message to be discarded (retries exhausted)
 	waitFor(t, 10*time.Second, func() bool {
-		count, _ := sched.CountPending(ctx)
+		count, _ := sched.countPending(ctx)
 		return count == 0
 	}, "message to be discarded after max retries")
 
@@ -372,7 +372,7 @@ func TestRedis_Integration_DLQStoreFailure(t *testing.T) {
 
 	// Message should still be discarded even if DLQ fails
 	waitFor(t, 10*time.Second, func() bool {
-		count, _ := sched.CountPending(ctx)
+		count, _ := sched.countPending(ctx)
 		return count == 0
 	}, "message to be discarded after DLQ failure")
 }

@@ -181,7 +181,15 @@ func (s *inMemorySchedulerWithDLQ) processDue(ctx context.Context) {
 			if s.maxRetries > 0 && msg.RetryCount >= s.maxRetries {
 				// Send to DLQ
 				if s.dlq != nil {
-					_ = s.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, err, msg.RetryCount, "scheduler")
+					_ = s.dlq.Store(ctx, DLQStoreParams{
+						EventName:  msg.EventName,
+						OriginalID: msg.ID,
+						Payload:    msg.Payload,
+						Metadata:   msg.Metadata,
+						Err:        err,
+						RetryCount: msg.RetryCount,
+						Source:     "scheduler",
+					})
 				}
 				delete(s.messages, id)
 				continue

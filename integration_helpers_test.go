@@ -162,7 +162,7 @@ func newMockDLQ() *mockDLQIntegration {
 	}
 }
 
-func (m *mockDLQIntegration) Store(ctx context.Context, eventName, originalID string, payload []byte, metadata map[string]string, err error, retryCount int, source string) error {
+func (m *mockDLQIntegration) Store(ctx context.Context, params DLQStoreParams) error {
 	m.mu.Lock()
 	if m.failNext {
 		m.failNext = false
@@ -170,13 +170,13 @@ func (m *mockDLQIntegration) Store(ctx context.Context, eventName, originalID st
 		return fmt.Errorf("DLQ store failure")
 	}
 	m.entries = append(m.entries, integrationDLQEntry{
-		EventName:  eventName,
-		OriginalID: originalID,
-		Payload:    payload,
-		Metadata:   metadata,
-		Err:        err,
-		RetryCount: retryCount,
-		Source:     source,
+		EventName:  params.EventName,
+		OriginalID: params.OriginalID,
+		Payload:    params.Payload,
+		Metadata:   params.Metadata,
+		Err:        params.Err,
+		RetryCount: params.RetryCount,
+		Source:     params.Source,
 	})
 	m.mu.Unlock()
 

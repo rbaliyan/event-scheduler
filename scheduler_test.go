@@ -719,17 +719,17 @@ type dlqEntry struct {
 	Source     string
 }
 
-func (m *mockDLQ) Store(ctx context.Context, eventName, originalID string, payload []byte, metadata map[string]string, err error, retryCount int, source string) error {
+func (m *mockDLQ) Store(ctx context.Context, params DLQStoreParams) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messages = append(m.messages, dlqEntry{
-		EventName:  eventName,
-		OriginalID: originalID,
-		Payload:    payload,
-		Metadata:   metadata,
-		Err:        err,
-		RetryCount: retryCount,
-		Source:     source,
+		EventName:  params.EventName,
+		OriginalID: params.OriginalID,
+		Payload:    params.Payload,
+		Metadata:   params.Metadata,
+		Err:        params.Err,
+		RetryCount: params.RetryCount,
+		Source:     params.Source,
 	})
 	return nil
 }

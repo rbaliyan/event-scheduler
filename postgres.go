@@ -289,50 +289,22 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 // - Decreases when messages are found (more activity expected)
 // - Increases when no messages are found (less activity expected)
 func (s *PostgresScheduler) Start(ctx context.Context) error {
-	currentInterval := s.opts.pollInterval
-	ticker := time.NewTicker(currentInterval)
-	defer ticker.Stop()
+	s.setupMetricsCallbacks(ctx)
 
-	// Initialize adaptive polling state if enabled
-	var adaptiveState *adaptivePollState
-	if s.opts.adaptivePolling {
-		adaptiveState = newAdaptivePollState(
-			s.opts.pollInterval,
-			s.opts.minPollInterval,
-			s.opts.maxPollInterval,
-		)
-		s.logger.Info("scheduler started with adaptive polling",
-			"initial_interval", s.opts.pollInterval,
-			"min_interval", s.opts.minPollInterval,
-			"max_interval", s.opts.maxPollInterval,
-			"batch_size", s.opts.batchSize)
-	} else {
-		s.logger.Info("scheduler started",
-			"poll_interval", s.opts.pollInterval,
-			"batch_size", s.opts.batchSize)
+	runSchedulerLoop(
+		s.logger,
+		s.opts,
+		ctx.Done(),
+		s.stopCh,
+		func() int { return s.processDue(ctx) },
+		nil, // PostgreSQL uses FOR UPDATE SKIP LOCKED; no stuck recovery needed
+		func() { close(s.stoppedCh) },
+	)
+
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			close(s.stoppedCh)
-			return ctx.Err()
-		case <-s.stopCh:
-			close(s.stoppedCh)
-			return nil
-		case <-ticker.C:
-			processed := s.processDue(ctx)
-
-			// Adjust poll interval if adaptive polling is enabled
-			if adaptiveState != nil {
-				newInterval := adaptiveState.adjust(processed)
-				if newInterval != currentInterval {
-					currentInterval = newInterval
-					ticker.Reset(currentInterval)
-				}
-			}
-		}
-	}
+	return nil
 }
 
 // Stop gracefully stops the scheduler
@@ -427,51 +399,16 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 				"error", publishErr,
 				"retry_count", msg.RetryCount)
 
-			// Record failure metrics
-			if s.opts.metrics != nil {
-				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
-			}
-
-			// Check if max retries exceeded
-			if s.opts.maxRetries > 0 && msg.RetryCount >= s.opts.maxRetries {
-				s.logger.Error("scheduled message exceeded max retries, discarding",
-					"id", msg.ID,
-					"event", msg.EventName,
-					"retry_count", msg.RetryCount,
-					"max_retries", s.opts.maxRetries)
-
-				// Send to DLQ if configured
-				if s.opts.dlq != nil {
-					if dlqErr := s.opts.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, publishErr, msg.RetryCount, "scheduler"); dlqErr != nil {
-						s.logger.Error("failed to send message to DLQ",
-							"id", msg.ID,
-							"error", dlqErr)
-					} else if s.opts.metrics != nil {
-						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
-					}
-				}
-
+			decision := handleDeliveryFailure(ctx, s.opts, &msg, publishErr, s.logger)
+			if decision.sendToDLQ {
 				toDiscard = append(toDiscard, msg.ID)
 				continue
 			}
 
-			// Schedule retry with backoff
-			newRetryCount := msg.RetryCount + 1
-			nextRetryAt := time.Now()
-			if s.opts.backoff != nil {
-				backoffDelay := s.opts.backoff.NextDelay(newRetryCount - 1)
-				nextRetryAt = nextRetryAt.Add(backoffDelay)
-				s.logger.Debug("scheduling retry with backoff",
-					"id", msg.ID,
-					"retry_count", newRetryCount,
-					"backoff_delay", backoffDelay,
-					"next_retry_at", nextRetryAt)
-			}
-
 			toRetry = append(toRetry, retryUpdate{
 				ID:         msg.ID,
-				RetryCount: newRetryCount,
-				NextRetry:  nextRetryAt,
+				RetryCount: decision.retryCount,
+				NextRetry:  decision.nextRetryAt,
 			})
 			continue
 		}
@@ -562,33 +499,26 @@ func (s *PostgresScheduler) MigrateAddRetryCount(ctx context.Context) error {
 	return err
 }
 
-// CountPending returns the number of pending scheduled messages.
-// This is useful for monitoring and metrics.
-func (s *PostgresScheduler) CountPending(ctx context.Context) (int64, error) {
+// countPending returns the number of pending scheduled messages.
+func (s *PostgresScheduler) countPending(ctx context.Context) (int64, error) {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table)
 	var count int64
 	err := s.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
 }
 
-// SetupMetricsCallbacks configures the metrics gauge callbacks for pending messages.
+// setupMetricsCallbacks configures the metrics gauge callbacks for pending messages.
 // This should be called after creating the scheduler if metrics are enabled.
 //
 // Note: PostgreSQL scheduler doesn't have a separate processing state like Redis/MongoDB,
 // so the stuck messages gauge will always be 0.
-//
-// Example:
-//
-//	metrics, _ := scheduler.NewMetrics()
-//	s := scheduler.NewPostgresScheduler(db, transport, scheduler.WithMetrics(metrics))
-//	s.SetupMetricsCallbacks(ctx)
-func (s *PostgresScheduler) SetupMetricsCallbacks(ctx context.Context) {
+func (s *PostgresScheduler) setupMetricsCallbacks(ctx context.Context) {
 	if s.opts.metrics == nil {
 		return
 	}
 
 	s.opts.metrics.SetPendingCallback(func() int64 {
-		count, err := s.CountPending(ctx)
+		count, err := s.countPending(ctx)
 		if err != nil {
 			s.logger.Error("failed to count pending messages for metrics", "error", err)
 			return 0
@@ -628,7 +558,7 @@ func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	}
 
 	// Count pending messages
-	pending, err := s.CountPending(ctx)
+	pending, err := s.countPending(ctx)
 	message := ""
 	status := health.StatusHealthy
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,21 @@ import (
 //  2. Remove it from the pending set
 //  3. Add it to the processing set with the current timestamp as score
 //  4. Return the member
+// scheduleScript atomically adds a message to the sorted set and index hash.
+// This ensures that both the sorted set entry and the index entry are written
+// together, preventing partial state if a failure occurs between the two operations.
+var scheduleScript = redis.NewScript(`
+local sortedSetKey = KEYS[1]
+local indexKey = KEYS[2]
+local score = tonumber(ARGV[1])
+local data = ARGV[2]
+local msgID = ARGV[3]
+
+redis.call('ZADD', sortedSetKey, score, data)
+redis.call('HSET', indexKey, msgID, data)
+return 1
+`)
+
 var claimScript = redis.NewScript(`
 	local items = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, 1)
 	if #items == 0 then
@@ -139,15 +155,12 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("marshal message: %w", err)
 	}
 
-	// Store in sorted set with scheduled time as score and index for O(1) lookups
-	pipe := s.client.Pipeline()
-	pipe.ZAdd(ctx, s.key(), redis.Z{
-		Score:  float64(msg.ScheduledAt.Unix()),
-		Member: data,
-	})
-	pipe.HSet(ctx, s.indexKey(), msg.ID, data)
-	if _, err = pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("schedule pipeline: %w", err)
+	// Atomically store in sorted set and index using Lua script
+	if err := scheduleScript.Run(ctx, s.client,
+		[]string{s.key(), s.indexKey()},
+		msg.ScheduledAt.Unix(), string(data), msg.ID,
+	).Err(); err != nil {
+		return fmt.Errorf("schedule: %w", err)
 	}
 
 	// Record metrics
@@ -232,6 +245,10 @@ func (s *RedisScheduler) Get(ctx context.Context, id string) (*Message, error) {
 // List returns scheduled messages matching the filter.
 //
 // Uses ZRANGEBYSCORE to efficiently query by scheduled time.
+// When no EventName filter is set, passes the Limit directly to Redis
+// to avoid fetching unnecessary data. When EventName is set, fetches
+// in pages since client-side filtering is required (Redis sorted sets
+// are indexed by score, not by member fields).
 // Returns empty slice if no matches.
 func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, error) {
 	min := "-inf"
@@ -244,30 +261,79 @@ func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 		max = fmt.Sprintf("%d", filter.Before.Unix())
 	}
 
-	results, err := s.client.ZRangeByScore(ctx, s.key(), &redis.ZRangeBy{
-		Min: min,
-		Max: max,
-	}).Result()
+	// When no EventName filter, we can pass Limit directly to Redis
+	if filter.EventName == "" {
+		rangeBy := &redis.ZRangeBy{
+			Min: min,
+			Max: max,
+		}
+		if filter.Limit > 0 {
+			rangeBy.Count = int64(filter.Limit)
+		}
 
-	if err != nil {
-		return nil, fmt.Errorf("zrangebyscore: %w", err)
+		results, err := s.client.ZRangeByScore(ctx, s.key(), rangeBy).Result()
+		if err != nil {
+			return nil, fmt.Errorf("zrangebyscore: %w", err)
+		}
+
+		var messages []*Message
+		for _, result := range results {
+			var msg Message
+			if err := json.Unmarshal([]byte(result), &msg); err != nil {
+				s.logger.Warn("skipping corrupt message in list", "error", err)
+				continue
+			}
+			messages = append(messages, &msg)
+		}
+		return messages, nil
 	}
 
+	// With EventName filter, fetch in pages to avoid loading everything at once.
+	// We need client-side filtering since Redis sorted sets are indexed by score only.
 	var messages []*Message
-	for _, result := range results {
-		var msg Message
-		if err := json.Unmarshal([]byte(result), &msg); err != nil {
-			slog.Warn("skipping corrupt message in list", "error", err)
-			continue
+	var offset int64
+	pageSize := int64(100)
+	if filter.Limit > 0 && int64(filter.Limit) < pageSize {
+		pageSize = int64(filter.Limit)
+	}
+
+	for {
+		results, err := s.client.ZRangeByScore(ctx, s.key(), &redis.ZRangeBy{
+			Min:    min,
+			Max:    max,
+			Offset: offset,
+			Count:  pageSize,
+		}).Result()
+		if err != nil {
+			return nil, fmt.Errorf("zrangebyscore: %w", err)
 		}
 
-		if filter.EventName != "" && msg.EventName != filter.EventName {
-			continue
+		if len(results) == 0 {
+			break
 		}
 
-		messages = append(messages, &msg)
+		for _, result := range results {
+			var msg Message
+			if err := json.Unmarshal([]byte(result), &msg); err != nil {
+				s.logger.Warn("skipping corrupt message in list", "error", err)
+				continue
+			}
 
-		if filter.Limit > 0 && len(messages) >= filter.Limit {
+			if msg.EventName != filter.EventName {
+				continue
+			}
+
+			messages = append(messages, &msg)
+
+			if filter.Limit > 0 && len(messages) >= filter.Limit {
+				return messages, nil
+			}
+		}
+
+		offset += int64(len(results))
+
+		// If we got fewer results than requested, we've exhausted the set
+		if int64(len(results)) < pageSize {
 			break
 		}
 	}
@@ -290,59 +356,22 @@ func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 //
 //	go scheduler.Start(ctx)
 func (s *RedisScheduler) Start(ctx context.Context) error {
-	currentInterval := s.opts.pollInterval
-	ticker := time.NewTicker(currentInterval)
-	defer ticker.Stop()
+	s.setupMetricsCallbacks(ctx)
 
-	// Recovery ticker for stuck messages (check every minute)
-	recoveryTicker := time.NewTicker(time.Minute)
-	defer recoveryTicker.Stop()
+	runSchedulerLoop(
+		s.logger,
+		s.opts,
+		ctx.Done(),
+		s.stopCh,
+		func() int { return s.processDue(ctx) },
+		func() { s.recoverStuck(ctx) },
+		func() { close(s.stoppedCh) },
+	)
 
-	// Initialize adaptive polling state if enabled
-	var adaptiveState *adaptivePollState
-	if s.opts.adaptivePolling {
-		adaptiveState = newAdaptivePollState(
-			s.opts.pollInterval,
-			s.opts.minPollInterval,
-			s.opts.maxPollInterval,
-		)
-		s.logger.Info("scheduler started with adaptive polling",
-			"initial_interval", s.opts.pollInterval,
-			"min_interval", s.opts.minPollInterval,
-			"max_interval", s.opts.maxPollInterval,
-			"batch_size", s.opts.batchSize)
-	} else {
-		s.logger.Info("scheduler started",
-			"poll_interval", s.opts.pollInterval,
-			"batch_size", s.opts.batchSize)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-
-	// Recover any stuck messages at startup
-	s.recoverStuck(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			close(s.stoppedCh)
-			return ctx.Err()
-		case <-s.stopCh:
-			close(s.stoppedCh)
-			return nil
-		case <-ticker.C:
-			processed := s.processDue(ctx)
-
-			// Adjust poll interval if adaptive polling is enabled
-			if adaptiveState != nil {
-				newInterval := adaptiveState.adjust(processed)
-				if newInterval != currentInterval {
-					currentInterval = newInterval
-					ticker.Reset(currentInterval)
-				}
-			}
-		case <-recoveryTicker.C:
-			s.recoverStuck(ctx)
-		}
-	}
+	return nil
 }
 
 // Stop gracefully stops the scheduler.
@@ -403,51 +432,21 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 				"error", err,
 				"retry_count", msg.RetryCount)
 
-			// Record failure metrics
-			if s.opts.metrics != nil {
-				s.opts.metrics.RecordFailed(ctx, msg.EventName, "publish_error")
+			// Remove from processing set
+			if err := s.client.ZRem(ctx, s.processingKey(), member).Err(); err != nil {
+				s.logger.Warn("failed to remove from processing set", "id", msg.ID, "error", err)
 			}
 
-			// Remove from processing set
-			s.client.ZRem(ctx, s.processingKey(), member)
-
-			// Check if max retries exceeded
-			if s.opts.maxRetries > 0 && msg.RetryCount >= s.opts.maxRetries {
-				s.logger.Error("scheduled message exceeded max retries, discarding",
-					"id", msg.ID,
-					"event", msg.EventName,
-					"retry_count", msg.RetryCount,
-					"max_retries", s.opts.maxRetries)
-
-				// Send to DLQ if configured
-				if s.opts.dlq != nil {
-					if dlqErr := s.opts.dlq.Store(ctx, msg.EventName, msg.ID, msg.Payload, msg.Metadata, err, msg.RetryCount, "scheduler"); dlqErr != nil {
-						s.logger.Error("failed to send message to DLQ",
-							"id", msg.ID,
-							"error", dlqErr)
-					} else if s.opts.metrics != nil {
-						s.opts.metrics.RecordDLQSent(ctx, msg.EventName)
-					}
-				}
-
+			decision := handleDeliveryFailure(ctx, s.opts, msg, err, s.logger)
+			if decision.sendToDLQ {
 				// Clean up index entry
 				s.client.HDel(ctx, s.indexKey(), msg.ID)
 				continue
 			}
 
-			// Increment retry count and calculate next retry time
-			msg.RetryCount++
-			nextRetryAt := time.Now()
-			if s.opts.backoff != nil {
-				backoffDelay := s.opts.backoff.NextDelay(msg.RetryCount - 1)
-				nextRetryAt = nextRetryAt.Add(backoffDelay)
-				s.logger.Debug("scheduling retry with backoff",
-					"id", msg.ID,
-					"retry_count", msg.RetryCount,
-					"backoff_delay", backoffDelay,
-					"next_retry_at", nextRetryAt)
-			}
-			msg.ScheduledAt = nextRetryAt
+			// Update message for retry
+			msg.RetryCount = decision.retryCount
+			msg.ScheduledAt = decision.nextRetryAt
 
 			// Re-serialize with updated retry count and scheduled time
 			updatedMember, marshalErr := json.Marshal(msg)
@@ -474,7 +473,7 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 		pipe.ZRem(ctx, s.processingKey(), member)
 		pipe.HDel(ctx, s.indexKey(), msg.ID)
 		if _, err := pipe.Exec(ctx); err != nil {
-			slog.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
+			s.logger.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
 		}
 
 		// Record delivery metrics
@@ -604,40 +603,31 @@ func (s *RedisScheduler) indexKey() string {
 	return s.opts.keyPrefix + "index"
 }
 
-// CountPending returns the number of pending scheduled messages.
-// This is useful for monitoring and metrics.
-func (s *RedisScheduler) CountPending(ctx context.Context) (int64, error) {
+// countPending returns the number of pending scheduled messages.
+func (s *RedisScheduler) countPending(ctx context.Context) (int64, error) {
 	return s.client.ZCard(ctx, s.key()).Result()
 }
 
-// CountProcessing returns the number of messages currently being processed.
-// This is useful for monitoring and metrics.
-func (s *RedisScheduler) CountProcessing(ctx context.Context) (int64, error) {
+// countProcessing returns the number of messages currently being processed.
+func (s *RedisScheduler) countProcessing(ctx context.Context) (int64, error) {
 	return s.client.ZCard(ctx, s.processingKey()).Result()
 }
 
-// CountStuck returns the number of messages stuck in processing (older than stuckDuration).
-// This is useful for monitoring and metrics.
-func (s *RedisScheduler) CountStuck(ctx context.Context) (int64, error) {
+// countStuck returns the number of messages stuck in processing (older than stuckDuration).
+func (s *RedisScheduler) countStuck(ctx context.Context) (int64, error) {
 	cutoff := time.Now().Add(-s.opts.stuckDuration).Unix()
 	return s.client.ZCount(ctx, s.processingKey(), "-inf", fmt.Sprintf("%d", cutoff)).Result()
 }
 
-// SetupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
+// setupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
 // This should be called after creating the scheduler if metrics are enabled.
-//
-// Example:
-//
-//	metrics, _ := scheduler.NewMetrics()
-//	s := scheduler.NewRedisScheduler(client, transport, scheduler.WithMetrics(metrics))
-//	s.SetupMetricsCallbacks(ctx)
-func (s *RedisScheduler) SetupMetricsCallbacks(ctx context.Context) {
+func (s *RedisScheduler) setupMetricsCallbacks(ctx context.Context) {
 	if s.opts.metrics == nil {
 		return
 	}
 
 	s.opts.metrics.SetPendingCallback(func() int64 {
-		count, err := s.CountPending(ctx)
+		count, err := s.countPending(ctx)
 		if err != nil {
 			s.logger.Error("failed to count pending messages for metrics", "error", err)
 			return 0
@@ -646,7 +636,7 @@ func (s *RedisScheduler) SetupMetricsCallbacks(ctx context.Context) {
 	})
 
 	s.opts.metrics.SetStuckCallback(func() int64 {
-		count, err := s.CountStuck(ctx)
+		count, err := s.countStuck(ctx)
 		if err != nil {
 			s.logger.Error("failed to count stuck messages for metrics", "error", err)
 			return 0
@@ -679,31 +669,31 @@ func (s *RedisScheduler) Health(ctx context.Context) *health.Result {
 	}
 
 	status := health.StatusHealthy
-	var message string
+	var messages []string
 
 	// Count pending messages
-	pending, err := s.CountPending(ctx)
+	pending, err := s.countPending(ctx)
 	if err != nil {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("failed to count pending: %v", err)
+		messages = append(messages, fmt.Sprintf("failed to count pending: %v", err))
 	}
 
 	// Count stuck messages
-	stuck, err := s.CountStuck(ctx)
+	stuck, err := s.countStuck(ctx)
 	if err != nil {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("failed to count stuck: %v", err)
+		messages = append(messages, fmt.Sprintf("failed to count stuck: %v", err))
 	}
 
 	// Degraded if stuck messages exist
 	if stuck > 0 && status == health.StatusHealthy {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("%d messages stuck in processing", stuck)
+		messages = append(messages, fmt.Sprintf("%d messages stuck in processing", stuck))
 	}
 
 	return &health.Result{
 		Status:    status,
-		Message:   message,
+		Message:   strings.Join(messages, "; "),
 		Latency:   time.Since(start),
 		CheckedAt: start,
 		Details: map[string]any{
