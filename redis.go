@@ -608,11 +608,6 @@ func (s *RedisScheduler) countPending(ctx context.Context) (int64, error) {
 	return s.client.ZCard(ctx, s.key()).Result()
 }
 
-// countProcessing returns the number of messages currently being processed.
-func (s *RedisScheduler) countProcessing(ctx context.Context) (int64, error) {
-	return s.client.ZCard(ctx, s.processingKey()).Result()
-}
-
 // countStuck returns the number of messages stuck in processing (older than stuckDuration).
 func (s *RedisScheduler) countStuck(ctx context.Context) (int64, error) {
 	cutoff := time.Now().Add(-s.opts.stuckDuration).Unix()

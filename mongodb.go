@@ -139,13 +139,15 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 	}, nil
 }
 
-// mongoCollection returns the underlying MongoDB collection for use in tests.
-func (s *MongoScheduler) mongoCollection() *mongo.Collection {
+// Collection returns the underlying MongoDB collection.
+// Use this if you need direct access for operational tasks (e.g., dropping in tests).
+func (s *MongoScheduler) Collection() *mongo.Collection {
 	return s.collection
 }
 
-// indexes returns the required indexes for the scheduler collection.
-func (s *MongoScheduler) indexes() []mongo.IndexModel {
+// Indexes returns the required index models for the scheduler collection.
+// Use this if you prefer to manage indexes separately (e.g., via migrations).
+func (s *MongoScheduler) Indexes() []mongo.IndexModel {
 	return []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "scheduled_at", Value: 1}},
@@ -162,9 +164,10 @@ func (s *MongoScheduler) indexes() []mongo.IndexModel {
 	}
 }
 
-// ensureIndexes creates the required indexes for the scheduler collection.
-func (s *MongoScheduler) ensureIndexes(ctx context.Context) error {
-	_, err := s.collection.Indexes().CreateMany(ctx, s.indexes())
+// EnsureIndexes creates the required indexes for the scheduler collection.
+// Call this once during application startup.
+func (s *MongoScheduler) EnsureIndexes(ctx context.Context) error {
+	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
 	return err
 }
 
@@ -513,12 +516,6 @@ func (s *MongoScheduler) countPending(ctx context.Context) (int64, error) {
 			{"status": bson.M{"$exists": false}}, // Backward compat: no status = pending
 		},
 	}
-	return s.collection.CountDocuments(ctx, filter)
-}
-
-// countProcessing returns the number of messages currently being processed.
-func (s *MongoScheduler) countProcessing(ctx context.Context) (int64, error) {
-	filter := bson.M{"status": statusProcessing}
 	return s.collection.CountDocuments(ctx, filter)
 }
 

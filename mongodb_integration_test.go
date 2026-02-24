@@ -44,13 +44,13 @@ func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Mong
 		t.Fatalf("failed to create scheduler: %v", err)
 	}
 
-	if err := sched.ensureIndexes(context.Background()); err != nil {
+	if err := sched.EnsureIndexes(context.Background()); err != nil {
 		t.Fatalf("failed to ensure indexes: %v", err)
 	}
 
 	cleanup := func() {
 		ctx := context.Background()
-		_ = sched.mongoCollection().Drop(ctx)
+		_ = sched.Collection().Drop(ctx)
 		_ = client.Disconnect(ctx)
 	}
 
@@ -377,7 +377,7 @@ func TestMongo_Integration_DLQStoreFailure(t *testing.T) {
 
 	waitFor(t, 10*time.Second, func() bool {
 		count, _ := sched.countPending(context.Background())
-		processing, _ := sched.countProcessing(context.Background())
+		processing, _ := sched.Collection().CountDocuments(context.Background(), bson.M{"status": statusProcessing})
 		return count == 0 && processing == 0
 	}, "message to be discarded after DLQ failure")
 }
@@ -403,7 +403,7 @@ func TestMongo_Integration_StuckRecovery(t *testing.T) {
 		"claimed_at":   oldTime,
 		"retry_count":  0,
 	}
-	_, err := sched.mongoCollection().InsertOne(ctx, doc)
+	_, err := sched.Collection().InsertOne(ctx, doc)
 	if err != nil {
 		t.Fatalf("InsertOne error: %v", err)
 	}
