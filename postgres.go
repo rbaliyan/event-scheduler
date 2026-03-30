@@ -100,6 +100,7 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
+// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, event_name, payload, metadata, scheduled_at, created_at, retry_count)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -141,11 +142,11 @@ func (s *PostgresScheduler) Cancel(ctx context.Context, id string) error {
 	// First, get the event name for metrics if enabled
 	var eventName string
 	if s.opts.metrics != nil {
-		query := fmt.Sprintf("SELECT event_name FROM %s WHERE id = $1", s.table)
+		query := fmt.Sprintf("SELECT event_name FROM %s WHERE id = $1", s.table) // #nosec G201 -- table name is set at construction, not user input
 		_ = s.db.QueryRowContext(ctx, query, id).Scan(&eventName)
 	}
 
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.table)
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.table) // #nosec G201 -- table name is set at construction, not user input
 
 	result, err := s.db.ExecContext(ctx, query, id)
 	if err != nil {
@@ -171,7 +172,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 	if id == "" {
 		return nil, fmt.Errorf("get: id must not be empty")
 	}
-
+	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
@@ -207,6 +208,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 	return &msg, nil
 }
 
+// #nosec G201 -- table name is set at construction, not user input
 // List returns scheduled messages
 func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message, error) {
 	query := fmt.Sprintf(`
@@ -339,6 +341,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	defer func() { _ = tx.Rollback() }()
 
 	// Lock and fetch due messages
+	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
 		FROM %s
@@ -432,7 +435,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 
 	// Delete delivered messages
 	if len(toDelete) > 0 {
-		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table)
+		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table) // #nosec G201 -- table name is set at construction, not user input
 		_, err = tx.ExecContext(ctx, deleteQuery, toDelete)
 		if err != nil {
 			s.logger.Error("failed to delete delivered messages", "error", err)
@@ -442,7 +445,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 
 	// Delete discarded messages (max retries exceeded)
 	if len(toDiscard) > 0 {
-		discardQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table)
+		discardQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table) // #nosec G201 -- table name is set at construction, not user input
 		_, err = tx.ExecContext(ctx, discardQuery, toDiscard)
 		if err != nil {
 			s.logger.Error("failed to delete discarded messages", "error", err)
@@ -453,6 +456,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	// Update messages for retry (new scheduled_at + incremented retry_count)
 	for _, r := range toRetry {
 		updateQuery := fmt.Sprintf(
+// #nosec G201 -- table name is set at construction, not user input
 			"UPDATE %s SET retry_count = $1, scheduled_at = $2 WHERE id = $3",
 			s.table)
 		_, err = tx.ExecContext(ctx, updateQuery, r.RetryCount, r.NextRetry, r.ID)
@@ -469,6 +473,7 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	}
 
 	return len(toDelete)
+// #nosec G201 -- table name is set at construction, not user input
 }
 
 // EnsureTable creates the scheduled_messages table if it doesn't exist.
@@ -492,7 +497,7 @@ func (s *PostgresScheduler) EnsureTable(ctx context.Context) error {
 // MigrateAddRetryCount adds the retry_count column to an existing table.
 // Safe to call multiple times; uses ADD COLUMN IF NOT EXISTS.
 func (s *PostgresScheduler) MigrateAddRetryCount(ctx context.Context) error {
-	query := fmt.Sprintf(
+	query := fmt.Sprintf( // #nosec G201 -- table name is set at construction, not user input
 		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
 		s.table)
 	_, err := s.db.ExecContext(ctx, query)
@@ -501,7 +506,7 @@ func (s *PostgresScheduler) MigrateAddRetryCount(ctx context.Context) error {
 
 // countPending returns the number of pending scheduled messages.
 func (s *PostgresScheduler) countPending(ctx context.Context) (int64, error) {
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table)
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table) // #nosec G201 -- table name is set at construction, not user input
 	var count int64
 	err := s.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
