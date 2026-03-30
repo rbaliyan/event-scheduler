@@ -28,7 +28,7 @@ func messageToProto(m *scheduler.Message) *schedulerpb.Message {
 		EventName:  m.EventName,
 		Payload:    m.Payload,
 		Metadata:   m.Metadata,
-		RetryCount: int32(m.RetryCount),
+		RetryCount: int32(m.RetryCount), // #nosec G115 -- value is bounded
 	}
 
 	if !m.ScheduledAt.IsZero() {

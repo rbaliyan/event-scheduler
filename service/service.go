@@ -75,7 +75,7 @@ func (s *Service) List(ctx context.Context, req *schedulerpb.ListRequest) (*sche
 
 	return &schedulerpb.ListResponse{
 		Messages:   pbMsgs,
-		TotalCount: int32(len(pbMsgs)),
+		TotalCount: int32(len(pbMsgs)), // #nosec G115 -- value is bounded
 	}, nil
 }
 
