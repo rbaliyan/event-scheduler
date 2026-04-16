@@ -129,14 +129,20 @@ func NewMongoScheduler(db *mongo.Database, t transport.Transport, opts ...Option
 		return nil, fmt.Errorf("scheduler: invalid collection name %q", o.collection)
 	}
 
-	return &MongoScheduler{
+	s := &MongoScheduler{
 		collection: db.Collection(o.collection),
 		transport:  t,
 		opts:       o,
 		logger:     o.logger.With("component", "scheduler.mongodb"),
 		stopCh:     make(chan struct{}),
 		stoppedCh:  make(chan struct{}),
-	}, nil
+	}
+	go func() { // #nosec G118 — background goroutine intentionally outlives constructor context
+		if err := s.EnsureIndexes(context.Background()); err != nil {
+			s.logger.Error("failed to ensure scheduler indexes", "error", err)
+		}
+	}()
+	return s, nil
 }
 
 // Collection returns the underlying MongoDB collection.
