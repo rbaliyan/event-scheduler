@@ -505,7 +505,9 @@ func (s *RedisScheduler) claimDueMessage(ctx context.Context, now int64) (*Messa
 		pipe := s.client.Pipeline()
 		pipe.ZRem(ctx, s.processingKey(), msgID)
 		pipe.HDel(ctx, s.indexKey(), msgID)
-		pipe.Exec(ctx)
+		if _, execErr := pipe.Exec(ctx); execErr != nil {
+			s.logger.Warn("failed to clean up corrupt message", "id", msgID, "error", execErr)
+		}
 		s.logger.Error("corrupt message in index, discarding", "id", msgID, "error", err)
 		return nil, "", redis.Nil
 	}
@@ -556,7 +558,9 @@ func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 			pipe := s.client.Pipeline()
 			pipe.ZRem(ctx, s.processingKey(), msgID)
 			pipe.HDel(ctx, s.indexKey(), msgID)
-			pipe.Exec(ctx)
+			if _, execErr := pipe.Exec(ctx); execErr != nil {
+				s.logger.Warn("failed to clean up corrupt stuck message", "id", msgID, "error", execErr)
+			}
 			continue
 		}
 
