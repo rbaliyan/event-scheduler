@@ -17,49 +17,52 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// claimScript atomically moves a due message from the pending set to the processing set.
-// It performs the following steps:
-//  1. Get the first item with score <= now from the pending set
-//  2. Remove it from the pending set
-//  3. Add it to the processing set with the current timestamp as score
-//  4. Return the member
-// scheduleScript atomically adds a message to the sorted set and index hash.
-// This ensures that both the sorted set entry and the index entry are written
-// together, preventing partial state if a failure occurs between the two operations.
-var scheduleScript = redis.NewScript(`
-local sortedSetKey = KEYS[1]
-local indexKey = KEYS[2]
-local score = tonumber(ARGV[1])
-local data = ARGV[2]
-local msgID = ARGV[3]
+// Redis key layout:
+//   {prefix}messages          sorted set  score=scheduled_unix  member=msgID
+//   {prefix}processing        sorted set  score=claimed_unix    member=msgID
+//   {prefix}events:{name}     sorted set  score=scheduled_unix  member=msgID
+//   {prefix}index             hash        field=msgID           value=JSON
+//
+// All sorted sets hold only message IDs. Full message data lives exclusively
+// in the index hash, so every set operation is O(log N) with no JSON scanning.
 
-redis.call('ZADD', sortedSetKey, score, data)
-redis.call('HSET', indexKey, msgID, data)
+// scheduleScript atomically writes all three sorted-set entries and the index hash.
+// KEYS[1]=messages  KEYS[2]=index  KEYS[3]=events:{event_name}
+// ARGV[1]=score(unix)  ARGV[2]=json  ARGV[3]=msgID
+var scheduleScript = redis.NewScript(`
+local score    = tonumber(ARGV[1])
+local data     = ARGV[2]
+local msgID    = ARGV[3]
+redis.call('ZADD', KEYS[1], score, msgID)
+redis.call('HSET', KEYS[2], msgID, data)
+redis.call('ZADD', KEYS[3], score, msgID)
 return 1
 `)
 
+// claimScript atomically moves one due message from pending to processing and
+// returns {msgID, json} so the caller never needs a second round-trip.
+// KEYS[1]=messages  KEYS[2]=processing  KEYS[3]=index
+// ARGV[1]=max_score(now)  ARGV[2]=claimed_at
 var claimScript = redis.NewScript(`
-	local items = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, 1)
-	if #items == 0 then
-		return nil
-	end
-	redis.call('ZREM', KEYS[1], items[1])
-	redis.call('ZADD', KEYS[2], ARGV[2], items[1])
-	return items[1]
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, 1)
+if #ids == 0 then
+    return nil
+end
+local msgID = ids[1]
+redis.call('ZREM',  KEYS[1], msgID)
+redis.call('ZADD',  KEYS[2], ARGV[2], msgID)
+local data = redis.call('HGET', KEYS[3], msgID)
+return {msgID, data}
 `)
 
 // RedisScheduler uses Redis sorted sets for scheduling.
 //
-// RedisScheduler provides distributed scheduled message delivery using Redis.
-// Messages are stored in a sorted set with the scheduled time as the score,
-// enabling efficient retrieval of due messages.
-//
-// Redis Data Structure:
-//   - Sorted Set: {prefix}messages - score=scheduled_time, member=JSON message
-//   - Sorted Set: {prefix}processing - messages being processed (for crash recovery)
+// All sorted sets store message IDs (not full JSON) so every set operation
+// is O(log N). Full message data lives in a single index hash, fetched with
+// O(1) HGET or O(M) HMGET for bulk operations.
 //
 // The scheduler uses a 2-phase approach for HA safety:
-//  1. Atomically move message from "messages" to "processing" set
+//  1. Atomically move message ID from "messages" to "processing" set
 //  2. Publish to transport
 //  3. Remove from "processing" set
 //
@@ -155,9 +158,9 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("marshal message: %w", err)
 	}
 
-	// Atomically store in sorted set and index using Lua script
+	// Atomically store in sorted set, index, and per-event sorted set using Lua script
 	if err := scheduleScript.Run(ctx, s.client,
-		[]string{s.key(), s.indexKey()},
+		[]string{s.key(), s.indexKey(), s.eventKey(msg.EventName)},
 		msg.ScheduledAt.Unix(), string(data), msg.ID,
 	).Err(); err != nil {
 		return fmt.Errorf("schedule: %w", err)
@@ -178,15 +181,14 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 
 // Cancel cancels a scheduled message before delivery.
 //
-// Looks up the message in the index and removes it from both the sorted set and index.
-// Returns error if the message is not found.
+// Reads event name from the index (needed for event set cleanup), then removes
+// the ID from all sorted sets and the index in a single pipeline.
 func (s *RedisScheduler) Cancel(ctx context.Context, id string) error {
 	if id == "" {
 		return fmt.Errorf("cancel: id must not be empty")
 	}
 
-	// Look up the member from the index
-	member, err := s.client.HGet(ctx, s.indexKey(), id).Result()
+	data, err := s.client.HGet(ctx, s.indexKey(), id).Result()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
 			return fmt.Errorf("%s: %w", id, ErrNotFound)
@@ -195,20 +197,20 @@ func (s *RedisScheduler) Cancel(ctx context.Context, id string) error {
 	}
 
 	var msg Message
-	if err := json.Unmarshal([]byte(member), &msg); err != nil {
+	if err := json.Unmarshal([]byte(data), &msg); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
 
-	// Remove from sorted set and index atomically via pipeline
+	// All sorted sets hold the message ID directly — ZRem by id, no JSON needed.
 	pipe := s.client.Pipeline()
-	pipe.ZRem(ctx, s.key(), member)
-	pipe.ZRem(ctx, s.processingKey(), member)
+	pipe.ZRem(ctx, s.key(), id)
+	pipe.ZRem(ctx, s.processingKey(), id)
+	pipe.ZRem(ctx, s.eventKey(msg.EventName), id)
 	pipe.HDel(ctx, s.indexKey(), id)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("cancel pipeline: %w", err)
 	}
 
-	// Record metrics
 	if s.opts.metrics != nil {
 		s.opts.metrics.RecordCancelled(ctx, msg.EventName)
 	}
@@ -244,12 +246,10 @@ func (s *RedisScheduler) Get(ctx context.Context, id string) (*Message, error) {
 
 // List returns scheduled messages matching the filter.
 //
-// Uses ZRANGEBYSCORE to efficiently query by scheduled time.
-// When no EventName filter is set, passes the Limit directly to Redis
-// to avoid fetching unnecessary data. When EventName is set, fetches
-// in pages since client-side filtering is required (Redis sorted sets
-// are indexed by score, not by member fields).
-// Returns empty slice if no matches.
+// When EventName is set, queries the per-event sorted set for O(log N + M) lookup,
+// then bulk-fetches full messages from the index hash. When EventName is empty,
+// queries the main sorted set directly. Offset and Limit are pushed down to Redis
+// in both paths.
 func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, error) {
 	min := "-inf"
 	max := "+inf"
@@ -261,83 +261,58 @@ func (s *RedisScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 		max = fmt.Sprintf("%d", filter.Before.Unix())
 	}
 
-	// When no EventName filter, we can pass Limit directly to Redis
-	if filter.EventName == "" {
-		rangeBy := &redis.ZRangeBy{
-			Min: min,
-			Max: max,
-		}
-		if filter.Limit > 0 {
-			rangeBy.Count = int64(filter.Limit)
-		}
-
-		results, err := s.client.ZRangeByScore(ctx, s.key(), rangeBy).Result()
-		if err != nil {
-			return nil, fmt.Errorf("zrangebyscore: %w", err)
-		}
-
-		var messages []*Message
-		for _, result := range results {
-			var msg Message
-			if err := json.Unmarshal([]byte(result), &msg); err != nil {
-				s.logger.Warn("skipping corrupt message in list", "error", err)
-				continue
-			}
-			messages = append(messages, &msg)
-		}
-		return messages, nil
+	rangeBy := &redis.ZRangeBy{Min: min, Max: max}
+	if filter.Offset > 0 {
+		rangeBy.Offset = int64(filter.Offset)
+	}
+	if filter.Limit > 0 {
+		rangeBy.Count = int64(filter.Limit)
 	}
 
-	// With EventName filter, fetch in pages to avoid loading everything at once.
-	// We need client-side filtering since Redis sorted sets are indexed by score only.
+	if filter.EventName != "" {
+		ids, err := s.client.ZRangeByScore(ctx, s.eventKey(filter.EventName), rangeBy).Result()
+		if err != nil {
+			return nil, fmt.Errorf("zrangebyscore events: %w", err)
+		}
+		if len(ids) == 0 {
+			return nil, nil
+		}
+		return s.fetchMessages(ctx, ids)
+	}
+
+	// No EventName filter: query main sorted set (IDs) then bulk-fetch from index.
+	ids, err := s.client.ZRangeByScore(ctx, s.key(), rangeBy).Result()
+	if err != nil {
+		return nil, fmt.Errorf("zrangebyscore: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.fetchMessages(ctx, ids)
+}
+
+// fetchMessages bulk-fetches full message data from the index hash for the given IDs.
+func (s *RedisScheduler) fetchMessages(ctx context.Context, ids []string) ([]*Message, error) {
+	members, err := s.client.HMGet(ctx, s.indexKey(), ids...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("hmget: %w", err)
+	}
 	var messages []*Message
-	var offset int64
-	pageSize := int64(100)
-	if filter.Limit > 0 && int64(filter.Limit) < pageSize {
-		pageSize = int64(filter.Limit)
+	for i, m := range members {
+		if m == nil {
+			continue
+		}
+		jsonStr, ok := m.(string)
+		if !ok {
+			continue
+		}
+		var msg Message
+		if err := json.Unmarshal([]byte(jsonStr), &msg); err != nil {
+			s.logger.Warn("skipping corrupt message in list", "id", ids[i], "error", err)
+			continue
+		}
+		messages = append(messages, &msg)
 	}
-
-	for {
-		results, err := s.client.ZRangeByScore(ctx, s.key(), &redis.ZRangeBy{
-			Min:    min,
-			Max:    max,
-			Offset: offset,
-			Count:  pageSize,
-		}).Result()
-		if err != nil {
-			return nil, fmt.Errorf("zrangebyscore: %w", err)
-		}
-
-		if len(results) == 0 {
-			break
-		}
-
-		for _, result := range results {
-			var msg Message
-			if err := json.Unmarshal([]byte(result), &msg); err != nil {
-				s.logger.Warn("skipping corrupt message in list", "error", err)
-				continue
-			}
-
-			if msg.EventName != filter.EventName {
-				continue
-			}
-
-			messages = append(messages, &msg)
-
-			if filter.Limit > 0 && len(messages) >= filter.Limit {
-				return messages, nil
-			}
-		}
-
-		offset += int64(len(results))
-
-		// If we got fewer results than requested, we've exhausted the set
-		if int64(len(results)) < pageSize {
-			break
-		}
-	}
-
 	return messages, nil
 }
 
@@ -439,8 +414,12 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 
 			decision := handleDeliveryFailure(ctx, s.opts, msg, err, s.logger)
 			if decision.sendToDLQ {
-				// Clean up index entry
-				s.client.HDel(ctx, s.indexKey(), msg.ID)
+				cleanPipe := s.client.Pipeline()
+				cleanPipe.HDel(ctx, s.indexKey(), msg.ID)
+				cleanPipe.ZRem(ctx, s.eventKey(msg.EventName), msg.ID)
+				if _, pipeErr := cleanPipe.Exec(ctx); pipeErr != nil {
+					s.logger.Warn("failed to clean up DLQ message", "id", msg.ID, "error", pipeErr)
+				}
 				continue
 			}
 
@@ -448,30 +427,27 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 			msg.RetryCount = decision.retryCount
 			msg.ScheduledAt = decision.nextRetryAt
 
-			// Re-serialize with updated retry count and scheduled time
-			updatedMember, marshalErr := json.Marshal(msg)
+			updatedData, marshalErr := json.Marshal(msg)
 			if marshalErr != nil {
 				s.logger.Error("failed to marshal message for retry", "error", marshalErr)
 				continue
 			}
 
-			// Add back to pending with updated scheduled time and update index
-			retryPipe := s.client.Pipeline()
-			retryPipe.ZAdd(ctx, s.key(), redis.Z{
-				Score:  float64(msg.ScheduledAt.Unix()),
-				Member: updatedMember,
-			})
-			retryPipe.HSet(ctx, s.indexKey(), msg.ID, updatedMember)
-			if _, err := retryPipe.Exec(ctx); err != nil {
-				s.logger.Error("failed to execute retry pipeline", "id", msg.ID, "error", err)
+			// Reuse scheduleScript for atomicity: ZADD messages + HSET index + ZADD events.
+			if err := scheduleScript.Run(ctx, s.client,
+				[]string{s.key(), s.indexKey(), s.eventKey(msg.EventName)},
+				msg.ScheduledAt.Unix(), string(updatedData), msg.ID,
+			).Err(); err != nil {
+				s.logger.Error("failed to reschedule for retry", "id", msg.ID, "error", err)
 			}
 			continue
 		}
 
-		// Remove from processing set and index after successful publish
+		// Remove from processing set, index, and per-event set after successful publish
 		pipe := s.client.Pipeline()
 		pipe.ZRem(ctx, s.processingKey(), member)
 		pipe.HDel(ctx, s.indexKey(), msg.ID)
+		pipe.ZRem(ctx, s.eventKey(msg.EventName), msg.ID)
 		if _, err := pipe.Exec(ctx); err != nil {
 			s.logger.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
 		}
@@ -489,87 +465,106 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 	return processed
 }
 
-// claimDueMessage atomically claims a due message using a Lua script.
-// Moves the message from the pending set to the processing set.
-// This prevents race conditions in HA deployments where multiple schedulers run.
+// claimDueMessage atomically moves one due message from pending to processing.
+// The Lua script returns {msgID, json}; the second return value is the msgID,
+// used by the caller to reference the message in the processing set.
 func (s *RedisScheduler) claimDueMessage(ctx context.Context, now int64) (*Message, string, error) {
 	claimedAt := time.Now().Unix()
-	result, err := claimScript.Run(ctx, s.client, []string{s.key(), s.processingKey()}, now, claimedAt).Result()
+	result, err := claimScript.Run(ctx, s.client,
+		[]string{s.key(), s.processingKey(), s.indexKey()},
+		now, claimedAt,
+	).Result()
 	if err != nil {
 		return nil, "", err
 	}
-
 	if result == nil {
 		return nil, "", redis.Nil
 	}
 
-	member, ok := result.(string)
-	if !ok {
+	arr, ok := result.([]interface{})
+	if !ok || len(arr) < 2 {
 		return nil, "", fmt.Errorf("unexpected claim result type: %T", result)
+	}
+	msgID, ok := arr[0].(string)
+	if !ok {
+		return nil, "", fmt.Errorf("unexpected msgID type: %T", arr[0])
+	}
+	if arr[1] == nil {
+		// Message was removed from index before we claimed it — clean up orphan.
+		s.client.ZRem(ctx, s.processingKey(), msgID)
+		return nil, "", redis.Nil
+	}
+	data, ok := arr[1].(string)
+	if !ok {
+		return nil, "", fmt.Errorf("unexpected data type: %T", arr[1])
 	}
 
 	var msg Message
-	if err := json.Unmarshal([]byte(member), &msg); err != nil {
-		// Corrupt message - remove from processing and clean index
-		s.client.ZRem(ctx, s.processingKey(), member)
-		var partial struct{ ID string }
-		if json.Unmarshal([]byte(member), &partial) == nil && partial.ID != "" {
-			s.client.HDel(ctx, s.indexKey(), partial.ID)
-		}
-		s.logger.Error("failed to unmarshal claimed message", "error", err)
+	if err := json.Unmarshal([]byte(data), &msg); err != nil {
+		// Corrupt index entry — remove everywhere.
+		pipe := s.client.Pipeline()
+		pipe.ZRem(ctx, s.processingKey(), msgID)
+		pipe.HDel(ctx, s.indexKey(), msgID)
+		pipe.Exec(ctx)
+		s.logger.Error("corrupt message in index, discarding", "id", msgID, "error", err)
 		return nil, "", redis.Nil
 	}
 
-	return &msg, member, nil
+	return &msg, msgID, nil
 }
 
 // recoverStuck moves messages stuck in "processing" back to "pending".
-// This handles scheduler crashes where messages were claimed but never published.
+// Processing set holds IDs; we fetch scheduled_at from the index to restore
+// the correct score in the messages set.
 func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 	cutoff := time.Now().Add(-s.opts.stuckDuration).Unix()
 
-	// Get messages that have been in processing too long
-	results, err := s.client.ZRangeByScoreWithScores(ctx, s.processingKey(), &redis.ZRangeBy{
+	ids, err := s.client.ZRangeByScore(ctx, s.processingKey(), &redis.ZRangeBy{
 		Min:   "-inf",
 		Max:   fmt.Sprintf("%d", cutoff),
 		Count: 100,
 	}).Result()
-
 	if err != nil {
 		s.logger.Error("failed to get stuck messages", "error", err)
 		return
 	}
+	if len(ids) == 0 {
+		return
+	}
 
-	if len(results) == 0 {
+	members, err := s.client.HMGet(ctx, s.indexKey(), ids...).Result()
+	if err != nil {
+		s.logger.Error("failed to fetch stuck messages from index", "error", err)
 		return
 	}
 
 	var recovered int64
-	for _, z := range results {
-		member, ok := z.Member.(string)
+	for i, m := range members {
+		msgID := ids[i]
+		if m == nil {
+			// Index already cleaned up — remove the orphan from processing.
+			s.client.ZRem(ctx, s.processingKey(), msgID)
+			continue
+		}
+		jsonStr, ok := m.(string)
 		if !ok {
-			s.logger.Error("unexpected member type in processing set", "type", fmt.Sprintf("%T", z.Member))
 			continue
 		}
-
 		var msg Message
-		if err := json.Unmarshal([]byte(member), &msg); err != nil {
-			// Corrupt message - remove from processing and clean index
-			s.client.ZRem(ctx, s.processingKey(), member)
-			// Try partial decode for ID to clean index
-			var partial struct{ ID string }
-			if json.Unmarshal([]byte(member), &partial) == nil && partial.ID != "" {
-				s.client.HDel(ctx, s.indexKey(), partial.ID)
-			}
+		if err := json.Unmarshal([]byte(jsonStr), &msg); err != nil {
+			// Corrupt entry — purge from all sets and index.
+			pipe := s.client.Pipeline()
+			pipe.ZRem(ctx, s.processingKey(), msgID)
+			pipe.HDel(ctx, s.indexKey(), msgID)
+			pipe.Exec(ctx)
 			continue
 		}
 
-		// Move back to pending with original scheduled time
 		pipe := s.client.Pipeline()
-		pipe.ZRem(ctx, s.processingKey(), member)
+		pipe.ZRem(ctx, s.processingKey(), msgID)
 		pipe.ZAdd(ctx, s.key(), redis.Z{
 			Score:  float64(msg.ScheduledAt.Unix()),
-			Member: member,
+			Member: msgID,
 		})
 		if _, err := pipe.Exec(ctx); err == nil {
 			recovered++
@@ -577,11 +572,9 @@ func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 	}
 
 	if recovered > 0 {
-		// Record recovery metrics
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordRecovered(ctx, recovered)
 		}
-
 		s.logger.Warn("recovered stuck scheduled messages",
 			"count", recovered,
 			"stuck_duration", s.opts.stuckDuration)
@@ -601,6 +594,12 @@ func (s *RedisScheduler) processingKey() string {
 // indexKey returns the Redis key for the message ID to member index hash.
 func (s *RedisScheduler) indexKey() string {
 	return s.opts.keyPrefix + "index"
+}
+
+// eventKey returns the Redis key for the per-event sorted set.
+// Score is the scheduled unix timestamp; members are message IDs.
+func (s *RedisScheduler) eventKey(eventName string) string {
+	return s.opts.keyPrefix + "events:" + eventName
 }
 
 // countPending returns the number of pending scheduled messages.

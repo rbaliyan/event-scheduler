@@ -155,6 +155,191 @@ func TestRedis_Integration_ListWithFilters(t *testing.T) {
 	}
 }
 
+func TestRedis_Integration_EventSetSyncAfterDelivery(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupRedisScheduler(t, mt)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Schedule 5 messages due immediately so they'll be picked up by processDue.
+	for i := 0; i < 5; i++ {
+		msg := makeMessage(fmt.Sprintf("sync-%d", i), "sync.event", now.Add(-time.Second))
+		if err := sched.Schedule(ctx, msg); err != nil {
+			t.Fatalf("Schedule() error: %v", err)
+		}
+	}
+
+	// Verify all 5 are visible before delivery.
+	list, err := sched.List(ctx, Filter{EventName: "sync.event"})
+	if err != nil {
+		t.Fatalf("pre-delivery List() error: %v", err)
+	}
+	if len(list) != 5 {
+		t.Fatalf("expected 5 messages before delivery, got %d", len(list))
+	}
+
+	// Run one delivery cycle and wait for all 5 to be published.
+	deliverCtx, cancel := context.WithCancel(ctx)
+	go sched.Start(deliverCtx)
+	for i := 0; i < 5; i++ {
+		mt.WaitForPublish(t, 5*time.Second)
+	}
+	cancel()
+
+	// After delivery, the event set must be empty.
+	list, err = sched.List(ctx, Filter{EventName: "sync.event"})
+	if err != nil {
+		t.Fatalf("post-delivery List() error: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("expected 0 messages after delivery, got %d (event set not cleaned up)", len(list))
+	}
+}
+
+func TestRedis_Integration_ListEventNameAfterPartialDelivery(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupRedisScheduler(t, mt)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// 3 messages due immediately, 2 scheduled far in the future.
+	for i := 0; i < 3; i++ {
+		msg := makeMessage(fmt.Sprintf("part-due-%d", i), "partial.event", now.Add(-time.Second))
+		if err := sched.Schedule(ctx, msg); err != nil {
+			t.Fatalf("Schedule() error: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		msg := makeMessage(fmt.Sprintf("part-future-%d", i), "partial.event", now.Add(time.Hour))
+		if err := sched.Schedule(ctx, msg); err != nil {
+			t.Fatalf("Schedule() error: %v", err)
+		}
+	}
+
+	// Deliver the 3 due messages.
+	deliverCtx, cancel := context.WithCancel(ctx)
+	go sched.Start(deliverCtx)
+	for i := 0; i < 3; i++ {
+		mt.WaitForPublish(t, 5*time.Second)
+	}
+	cancel()
+
+	// Only the 2 future messages should remain.
+	list, err := sched.List(ctx, Filter{EventName: "partial.event"})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 remaining messages after partial delivery, got %d", len(list))
+	}
+}
+
+func TestRedis_Integration_ListWithOffset(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupRedisScheduler(t, mt)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	for i := 0; i < 5; i++ {
+		msg := makeMessage(fmt.Sprintf("off-%d", i), "orders.created", now.Add(time.Duration(i+1)*time.Hour))
+		if err := sched.Schedule(ctx, msg); err != nil {
+			t.Fatalf("Schedule() error: %v", err)
+		}
+	}
+
+	// Offset beyond total should return empty
+	list, err := sched.List(ctx, Filter{EventName: "orders.created", Offset: 10})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(list) != 0 {
+		t.Errorf("expected 0 messages with offset beyond total, got %d", len(list))
+	}
+
+	// Page through with Limit+Offset
+	page1, err := sched.List(ctx, Filter{EventName: "orders.created", Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("List() page1 error: %v", err)
+	}
+	page2, err := sched.List(ctx, Filter{EventName: "orders.created", Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("List() page2 error: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Errorf("expected page1 len 2, got %d", len(page1))
+	}
+	if len(page2) != 2 {
+		t.Errorf("expected page2 len 2, got %d", len(page2))
+	}
+
+	ids1 := map[string]bool{}
+	for _, m := range page1 {
+		ids1[m.ID] = true
+	}
+	for _, m := range page2 {
+		if ids1[m.ID] {
+			t.Errorf("overlapping ID %q between page1 and page2", m.ID)
+		}
+	}
+
+	// Offset without EventName filter
+	all, err := sched.List(ctx, Filter{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() all error: %v", err)
+	}
+	skipped, err := sched.List(ctx, Filter{Offset: 2, Limit: 10})
+	if err != nil {
+		t.Fatalf("List() skipped error: %v", err)
+	}
+	if len(skipped) != len(all)-2 {
+		t.Errorf("expected %d messages with offset=2, got %d", len(all)-2, len(skipped))
+	}
+}
+
+func TestRedis_Integration_EventNameOrdering(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupRedisScheduler(t, mt)
+	defer cleanup()
+
+	ctx := context.Background()
+	now := time.Now()
+
+	// Schedule in non-chronological insertion order
+	msgs := []Message{
+		makeMessage("ord-3", "notify.email", now.Add(3*time.Hour)),
+		makeMessage("ord-1", "notify.email", now.Add(1*time.Hour)),
+		makeMessage("ord-5", "notify.email", now.Add(5*time.Hour)),
+		makeMessage("ord-2", "notify.email", now.Add(2*time.Hour)),
+	}
+	for _, m := range msgs {
+		if err := sched.Schedule(ctx, m); err != nil {
+			t.Fatalf("Schedule() error: %v", err)
+		}
+	}
+
+	list, err := sched.List(ctx, Filter{EventName: "notify.email"})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(list) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(list))
+	}
+
+	// Results should be in ascending scheduled_at order
+	for i := 1; i < len(list); i++ {
+		if list[i].ScheduledAt.Before(list[i-1].ScheduledAt) {
+			t.Errorf("messages not in ascending order at index %d: %v > %v",
+				i, list[i-1].ScheduledAt, list[i].ScheduledAt)
+		}
+	}
+}
+
 func TestRedis_Integration_CancelNonexistent(t *testing.T) {
 	mt := newMockTransport()
 	sched, cleanup := setupRedisScheduler(t, mt)
@@ -381,11 +566,11 @@ func TestRedis_Integration_StuckRecovery(t *testing.T) {
 	mt := newMockTransport()
 	sched, cleanup := setupRedisScheduler(t, mt)
 	defer cleanup()
-	sched.stuckDuration = 1 * time.Second
+	sched.opts.stuckDuration = 1 * time.Second
 
 	ctx := context.Background()
 
-	// Manually insert into processing set with old timestamp
+	// Manually inject a stuck message: ID in processing set, JSON in index hash.
 	msg := makeMessage("redis-stuck-1", "stuck.event", time.Now().Add(-time.Minute))
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -395,12 +580,14 @@ func TestRedis_Integration_StuckRecovery(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: getRedisAddr()})
 	defer client.Close()
 
-	err = client.ZAdd(ctx, sched.processingKey(), redis.Z{
+	pipe := client.Pipeline()
+	pipe.HSet(ctx, sched.indexKey(), msg.ID, string(data))
+	pipe.ZAdd(ctx, sched.processingKey(), redis.Z{
 		Score:  float64(time.Now().Add(-2 * time.Second).Unix()),
-		Member: data,
-	}).Err()
-	if err != nil {
-		t.Fatalf("ZAdd error: %v", err)
+		Member: msg.ID,
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("inject stuck message error: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)

@@ -386,7 +386,7 @@ func TestMongo_Integration_StuckRecovery(t *testing.T) {
 	mt := newMockTransport()
 	sched, cleanup := setupMongoScheduler(t, mt)
 	defer cleanup()
-	sched.stuckDuration = 1 * time.Second
+	sched.opts.stuckDuration = 1 * time.Second
 
 	ctx := context.Background()
 
