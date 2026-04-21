@@ -243,6 +243,12 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT $%d", argIndex)
 		args = append(args, filter.Limit)
+		argIndex++
+	}
+
+	if filter.Offset > 0 {
+		query += fmt.Sprintf(" OFFSET $%d", argIndex)
+		args = append(args, filter.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

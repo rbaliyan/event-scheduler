@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -253,6 +254,9 @@ func TestFilterDefaults(t *testing.T) {
 	if f.Limit != 0 {
 		t.Errorf("expected Limit 0, got %d", f.Limit)
 	}
+	if f.Offset != 0 {
+		t.Errorf("expected Offset 0, got %d", f.Offset)
+	}
 }
 
 func TestFilterWithAllFields(t *testing.T) {
@@ -382,7 +386,7 @@ func (m *memoryScheduler) List(ctx context.Context, filter Filter) ([]*Message, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var result []*Message
+	var matched []*Message
 	for _, msg := range m.messages {
 		if filter.EventName != "" && msg.EventName != filter.EventName {
 			continue
@@ -393,12 +397,25 @@ func (m *memoryScheduler) List(ctx context.Context, filter Filter) ([]*Message, 
 		if !filter.Before.IsZero() && msg.ScheduledAt.After(filter.Before) {
 			continue
 		}
-		result = append(result, msg)
-		if filter.Limit > 0 && len(result) >= filter.Limit {
-			break
-		}
+		matched = append(matched, msg)
 	}
-	return result, nil
+
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].ScheduledAt.Before(matched[j].ScheduledAt)
+	})
+
+	if filter.Offset > 0 {
+		if filter.Offset >= len(matched) {
+			return nil, nil
+		}
+		matched = matched[filter.Offset:]
+	}
+
+	if filter.Limit > 0 && len(matched) > filter.Limit {
+		matched = matched[:filter.Limit]
+	}
+
+	return matched, nil
 }
 
 func (m *memoryScheduler) Start(ctx context.Context) error {
@@ -609,6 +626,61 @@ func TestSchedulerContract_ListWithLimit(t *testing.T) {
 	}
 	if len(messages) > 3 {
 		t.Errorf("expected at most 3 messages, got %d", len(messages))
+	}
+}
+
+func TestSchedulerContract_ListWithOffset(t *testing.T) {
+	s := newMemoryScheduler()
+	ctx := context.Background()
+
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		msg := Message{
+			ID:          fmt.Sprintf("off-%d", i),
+			EventName:   "test.event",
+			Payload:     []byte("data"),
+			ScheduledAt: now.Add(time.Duration(i) * time.Hour),
+			CreatedAt:   now,
+		}
+		if err := s.Schedule(ctx, msg); err != nil {
+			t.Fatalf("Schedule() error: %v", err)
+		}
+	}
+
+	// Offset beyond total should return empty
+	messages, err := s.List(ctx, Filter{Offset: 10})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(messages) != 0 {
+		t.Errorf("expected 0 messages with offset beyond total, got %d", len(messages))
+	}
+
+	// Offset + Limit should page through results
+	page1, err := s.List(ctx, Filter{Limit: 2, Offset: 0})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	page2, err := s.List(ctx, Filter{Limit: 2, Offset: 2})
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Errorf("expected page1 len 2, got %d", len(page1))
+	}
+	if len(page2) != 2 {
+		t.Errorf("expected page2 len 2, got %d", len(page2))
+	}
+
+	// Pages must not overlap
+	ids1 := map[string]bool{}
+	for _, m := range page1 {
+		ids1[m.ID] = true
+	}
+	for _, m := range page2 {
+		if ids1[m.ID] {
+			t.Errorf("overlapping ID %q between page1 and page2", m.ID)
+		}
 	}
 }
 

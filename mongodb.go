@@ -298,6 +298,9 @@ func (s *MongoScheduler) List(ctx context.Context, filter Filter) ([]*Message, e
 	if filter.Limit > 0 {
 		opts.SetLimit(int64(filter.Limit))
 	}
+	if filter.Offset > 0 {
+		opts.SetSkip(int64(filter.Offset))
+	}
 
 	cursor, err := s.collection.Find(ctx, mongoFilter, opts)
 	if err != nil {

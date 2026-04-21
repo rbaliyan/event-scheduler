@@ -166,6 +166,10 @@ type Filter struct {
 
 	// Limit is the maximum number of messages to return (0 = no limit).
 	Limit int
+
+	// Offset is the number of messages to skip before returning results.
+	// Use with Limit for pagination.
+	Offset int
 }
 
 // BackoffStrategy is an alias for backoff.Strategy from the main event library.
