@@ -41,6 +41,7 @@ import (
     "encoding/json"
     "time"
 
+    "github.com/google/uuid"
     "github.com/rbaliyan/event-scheduler"
     "github.com/redis/go-redis/v9"
 )
@@ -54,10 +55,13 @@ func main() {
     })
 
     // Create scheduler with your transport
-    sched := scheduler.NewRedisScheduler(rdb, transport,
+    sched, err := scheduler.NewRedisScheduler(rdb, transport,
         scheduler.WithPollInterval(100*time.Millisecond),
         scheduler.WithBatchSize(100),
     )
+    if err != nil {
+        panic(err)
+    }
 
     // Start the scheduler (blocks until stopped)
     go sched.Start(ctx)
@@ -65,7 +69,7 @@ func main() {
     // Schedule a message for delivery in 1 hour
     payload, _ := json.Marshal(map[string]string{"order_id": "12345"})
     id := uuid.New().String()
-    err := sched.Schedule(ctx, scheduler.Message{
+    err = sched.Schedule(ctx, scheduler.Message{
         ID:          id,
         EventName:   "orders.reminder",
         Payload:     payload,
@@ -96,25 +100,28 @@ import (
     "time"
 
     "github.com/rbaliyan/event-scheduler"
-    "go.mongodb.org/mongo-driver/mongo"
-    "go.mongodb.org/mongo-driver/mongo/options"
+    "go.mongodb.org/mongo-driver/v2/mongo"
+    mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 func main() {
     ctx := context.Background()
 
-    // Connect to MongoDB
-    client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+    // Connect to MongoDB (mongo-driver v2: Connect takes only ClientOptions, no context)
+    client, err := mongo.Connect(mongoopts.Client().ApplyURI("mongodb://localhost:27017"))
     if err != nil {
         panic(err)
     }
     db := client.Database("myapp")
 
     // Create scheduler with custom collection name
-    sched := scheduler.NewMongoScheduler(db, transport,
+    sched, err := scheduler.NewMongoScheduler(db, transport,
         scheduler.WithPollInterval(100*time.Millisecond),
         scheduler.WithCollection("scheduled_jobs"),
     )
+    if err != nil {
+        panic(err)
+    }
 
     // Create indexes for optimal performance
     if err := sched.EnsureIndexes(ctx); err != nil {
@@ -152,10 +159,13 @@ func main() {
     }
 
     // Create scheduler with custom table name
-    sched := scheduler.NewPostgresScheduler(db, transport,
+    sched, err := scheduler.NewPostgresScheduler(db, transport,
         scheduler.WithPollInterval(100*time.Millisecond),
         scheduler.WithTable("my_scheduled_jobs"),
     )
+    if err != nil {
+        panic(err)
+    }
 
     // Auto-create the table and indexes
     if err := sched.EnsureTable(ctx); err != nil {
@@ -390,8 +400,7 @@ The `DeadLetterQueue` interface is satisfied by `dlq.Manager` from `github.com/r
 
 ```go
 type DeadLetterQueue interface {
-    Store(ctx context.Context, eventName, originalID string, payload []byte,
-          metadata map[string]string, err error, retryCount int, source string) error
+    Store(ctx context.Context, params DLQStoreParams) error
 }
 ```
 
@@ -453,8 +462,10 @@ All implementations support running multiple scheduler instances for high availa
 4. **Graceful Shutdown**: `Stop()` waits for in-flight processing to complete; safe to call multiple times
 
 ```go
-// Configure stuck message recovery timeout
-sched.WithStuckDuration(10 * time.Minute)
+// Configure stuck message recovery timeout via constructor option
+sched, err := scheduler.NewRedisScheduler(rdb, transport,
+    scheduler.WithStuckDuration(10 * time.Minute),
+)
 ```
 
 ## Testing
