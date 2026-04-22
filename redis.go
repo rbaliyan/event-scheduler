@@ -376,70 +376,25 @@ func (s *RedisScheduler) Stop(ctx context.Context) error {
 func (s *RedisScheduler) processDue(ctx context.Context) int {
 	processed := 0
 	now := time.Now().Unix()
-
-	// Reset backoff state at the start of each processing cycle to avoid
-	// shared mutable state accumulating across cycles. Each cycle computes
-	// delays independently using the per-message retry count.
-	if s.opts.backoff != nil {
-		if r, ok := s.opts.backoff.(Resetter); ok {
-			r.Reset()
-		}
-	}
+	resetBackoff(s.opts)
 
 	for i := 0; i < s.opts.batchSize; i++ {
 		processingStart := time.Now()
 
-		// Atomically move message from pending to processing
 		msg, member, err := s.claimDueMessage(ctx, now)
 		if err != nil {
 			if errors.Is(err, redis.Nil) {
-				break // No more due messages
+				break
 			}
 			s.logger.Error("failed to claim due message", "error", err)
 			break
 		}
 
-		// Publish to transport
 		if err := publishScheduledMessage(ctx, s.transport, msg); err != nil {
 			s.logger.Error("failed to publish scheduled message",
-				"id", msg.ID,
-				"event", msg.EventName,
-				"error", err,
-				"retry_count", msg.RetryCount)
-
-			// Remove from processing set
-			if err := s.client.ZRem(ctx, s.processingKey(), member).Err(); err != nil {
-				s.logger.Warn("failed to remove from processing set", "id", msg.ID, "error", err)
-			}
-
-			decision := handleDeliveryFailure(ctx, s.opts, msg, err, s.logger)
-			if decision.sendToDLQ {
-				cleanPipe := s.client.Pipeline()
-				cleanPipe.HDel(ctx, s.indexKey(), msg.ID)
-				cleanPipe.ZRem(ctx, s.eventKey(msg.EventName), msg.ID)
-				if _, pipeErr := cleanPipe.Exec(ctx); pipeErr != nil {
-					s.logger.Warn("failed to clean up DLQ message", "id", msg.ID, "error", pipeErr)
-				}
-				continue
-			}
-
-			// Update message for retry
-			msg.RetryCount = decision.retryCount
-			msg.ScheduledAt = decision.nextRetryAt
-
-			updatedData, marshalErr := json.Marshal(msg)
-			if marshalErr != nil {
-				s.logger.Error("failed to marshal message for retry", "error", marshalErr)
-				continue
-			}
-
-			// Reuse scheduleScript for atomicity: ZADD messages + HSET index + ZADD events.
-			if err := scheduleScript.Run(ctx, s.client,
-				[]string{s.key(), s.indexKey(), s.eventKey(msg.EventName)},
-				msg.ScheduledAt.Unix(), string(updatedData), msg.ID,
-			).Err(); err != nil {
-				s.logger.Error("failed to reschedule for retry", "id", msg.ID, "error", err)
-			}
+				"id", msg.ID, "event", msg.EventName,
+				"error", err, "retry_count", msg.RetryCount)
+			s.handlePublishError(ctx, msg, member, err)
 			continue
 		}
 
@@ -452,17 +407,47 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 			s.logger.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
 		}
 
-		// Record delivery metrics
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
-
-		s.logger.Debug("delivered scheduled message",
-			"id", msg.ID,
-			"event", msg.EventName)
+		s.logger.Debug("delivered scheduled message", "id", msg.ID, "event", msg.EventName)
 		processed++
 	}
 	return processed
+}
+
+// handlePublishError applies the DLQ-or-retry decision for a failed publish.
+// member is the processing-set score key used to remove the message from Redis.
+func (s *RedisScheduler) handlePublishError(ctx context.Context, msg *Message, member string, publishErr error) {
+	if err := s.client.ZRem(ctx, s.processingKey(), member).Err(); err != nil {
+		s.logger.Warn("failed to remove from processing set", "id", msg.ID, "error", err)
+	}
+
+	decision := handleDeliveryFailure(ctx, s.opts, msg, publishErr, s.logger)
+	if decision.sendToDLQ {
+		pipe := s.client.Pipeline()
+		pipe.HDel(ctx, s.indexKey(), msg.ID)
+		pipe.ZRem(ctx, s.eventKey(msg.EventName), msg.ID)
+		if _, err := pipe.Exec(ctx); err != nil {
+			s.logger.Warn("failed to clean up DLQ message", "id", msg.ID, "error", err)
+		}
+		return
+	}
+
+	msg.RetryCount = decision.retryCount
+	msg.ScheduledAt = decision.nextRetryAt
+	updatedData, marshalErr := json.Marshal(msg)
+	if marshalErr != nil {
+		s.logger.Error("failed to marshal message for retry", "error", marshalErr)
+		return
+	}
+	// Reuse scheduleScript for atomicity: ZADD messages + HSET index + ZADD events.
+	if err := scheduleScript.Run(ctx, s.client,
+		[]string{s.key(), s.indexKey(), s.eventKey(msg.EventName)},
+		msg.ScheduledAt.Unix(), string(updatedData), msg.ID,
+	).Err(); err != nil {
+		s.logger.Error("failed to reschedule for retry", "id", msg.ID, "error", err)
+	}
 }
 
 // claimDueMessage atomically moves one due message from pending to processing.

@@ -189,6 +189,15 @@ type Resetter interface {
 	Reset()
 }
 
+// resetBackoff resets the backoff strategy state at the start of each processing cycle.
+func resetBackoff(opts *options) {
+	if opts.backoff != nil {
+		if r, ok := opts.backoff.(Resetter); ok {
+			r.Reset()
+		}
+	}
+}
+
 // DLQStoreParams contains the parameters for storing a failed message in the DLQ.
 type DLQStoreParams struct {
 	// EventName is the name of the event that failed.

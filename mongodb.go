@@ -370,13 +370,7 @@ func (s *MongoScheduler) Stop(ctx context.Context) error {
 func (s *MongoScheduler) processDue(ctx context.Context) int {
 	processed := 0
 	now := time.Now()
-
-	// Reset backoff state at the start of each processing cycle
-	if s.opts.backoff != nil {
-		if r, ok := s.opts.backoff.(Resetter); ok {
-			r.Reset()
-		}
-	}
+	resetBackoff(s.opts)
 
 	for i := 0; i < s.opts.batchSize; i++ {
 		processingStart := time.Now()
@@ -384,66 +378,52 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 		msg, err := s.claimDue(ctx, now)
 		if err != nil {
 			if errors.Is(err, mongo.ErrNoDocuments) {
-				break // No more due messages
+				break
 			}
 			s.logger.Error("failed to claim due message", "error", err)
 			break
 		}
 
-		// Publish to transport
 		if publishErr := publishScheduledMessage(ctx, s.transport, msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
-				"id", msg.ID,
-				"event", msg.EventName,
-				"error", publishErr,
-				"retry_count", msg.RetryCount)
-
-			decision := handleDeliveryFailure(ctx, s.opts, msg, publishErr, s.logger)
-			if decision.sendToDLQ {
-				// Delete the message
-				if err := s.deleteClaimed(ctx, msg.ID); err != nil {
-					s.logger.Error("failed to delete claimed message", "id", msg.ID, "error", err)
-				}
-				continue
-			}
-
-			// Update document: reset status to pending, set new retry_count and scheduled_at
-			_, updateErr := s.collection.UpdateByID(ctx, msg.ID, bson.M{
-				"$set": bson.M{
-					"status":       statusPending,
-					"retry_count":  decision.retryCount,
-					"scheduled_at": decision.nextRetryAt,
-				},
-				"$unset": bson.M{
-					"claimed_at": "",
-				},
-			})
-			if updateErr != nil {
-				s.logger.Error("failed to update message for retry",
-					"id", msg.ID,
-					"error", updateErr)
-			}
+				"id", msg.ID, "event", msg.EventName,
+				"error", publishErr, "retry_count", msg.RetryCount)
+			s.handlePublishError(ctx, msg, publishErr)
 			continue
 		}
 
-		// Delete the message after successful publish
 		if err := s.deleteClaimed(ctx, msg.ID); err != nil {
-			s.logger.Error("failed to delete published message",
-				"id", msg.ID,
-				"error", err)
+			s.logger.Error("failed to delete published message", "id", msg.ID, "error", err)
 		}
-
-		// Record delivery metrics
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
-
-		s.logger.Debug("delivered scheduled message",
-			"id", msg.ID,
-			"event", msg.EventName)
+		s.logger.Debug("delivered scheduled message", "id", msg.ID, "event", msg.EventName)
 		processed++
 	}
 	return processed
+}
+
+// handlePublishError applies the DLQ-or-retry decision for a failed publish.
+func (s *MongoScheduler) handlePublishError(ctx context.Context, msg *Message, publishErr error) {
+	decision := handleDeliveryFailure(ctx, s.opts, msg, publishErr, s.logger)
+	if decision.sendToDLQ {
+		if err := s.deleteClaimed(ctx, msg.ID); err != nil {
+			s.logger.Error("failed to delete claimed message", "id", msg.ID, "error", err)
+		}
+		return
+	}
+	_, updateErr := s.collection.UpdateByID(ctx, msg.ID, bson.M{
+		"$set": bson.M{
+			"status":       statusPending,
+			"retry_count":  decision.retryCount,
+			"scheduled_at": decision.nextRetryAt,
+		},
+		"$unset": bson.M{"claimed_at": ""},
+	})
+	if updateErr != nil {
+		s.logger.Error("failed to update message for retry", "id", msg.ID, "error", updateErr)
+	}
 }
 
 // claimDue atomically claims a due message for processing.
