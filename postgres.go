@@ -100,7 +100,7 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
-// #nosec G201 -- table name is set at construction, not user input
+	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, event_name, payload, metadata, scheduled_at, created_at, retry_count)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -329,15 +329,17 @@ func (s *PostgresScheduler) Stop(ctx context.Context) error {
 	}
 }
 
-// processDue processes messages that are due for delivery
+// retryUpdate holds the retry scheduling state for a failed message.
+type retryUpdate struct {
+	ID         string
+	RetryCount int
+	NextRetry  time.Time
+}
+
+// processDue processes messages that are due for delivery.
 // Returns the number of messages processed (for adaptive polling).
 func (s *PostgresScheduler) processDue(ctx context.Context) int {
-	// Reset backoff state at the start of each processing cycle
-	if s.opts.backoff != nil {
-		if r, ok := s.opts.backoff.(Resetter); ok {
-			r.Reset()
-		}
-	}
+	resetBackoff(s.opts)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -346,7 +348,31 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Lock and fetch due messages
+	rows, err := s.queryDue(ctx, tx)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = rows.Close() }()
+
+	toDelete, toDiscard, toRetry, err := s.collectBatch(ctx, rows)
+	if err != nil {
+		return 0
+	}
+
+	if err := s.applyBatchResults(ctx, tx, toDelete, toDiscard, toRetry); err != nil {
+		return 0
+	}
+
+	if err := tx.Commit(); err != nil {
+		s.logger.Error("failed to commit transaction", "error", err)
+		return 0
+	}
+
+	return len(toDelete)
+}
+
+// queryDue locks and fetches due messages inside the given transaction.
+func (s *PostgresScheduler) queryDue(ctx context.Context, tx *sql.Tx) (*sql.Rows, error) {
 	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
@@ -356,130 +382,102 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 		LIMIT $2
 		FOR UPDATE SKIP LOCKED
 	`, s.table)
-
 	rows, err := tx.QueryContext(ctx, query, time.Now(), s.opts.batchSize)
 	if err != nil {
 		s.logger.Error("failed to query due messages", "error", err)
-		return 0
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	return rows, nil
+}
 
-	var toDelete []string
-	var toDiscard []string // exceeded maxRetries
-	type retryUpdate struct {
-		ID         string
-		RetryCount int
-		NextRetry  time.Time
-	}
-	var toRetry []retryUpdate
-
+// collectBatch iterates rows and classifies each message as delivered, discarded, or to retry.
+func (s *PostgresScheduler) collectBatch(ctx context.Context, rows *sql.Rows) (toDelete, toDiscard []string, toRetry []retryUpdate, err error) {
 	for rows.Next() {
 		processingStart := time.Now()
 
-		var msg Message
-		var metadata []byte
-
-		err := rows.Scan(
-			&msg.ID,
-			&msg.EventName,
-			&msg.Payload,
-			&metadata,
-			&msg.ScheduledAt,
-			&msg.CreatedAt,
-			&msg.RetryCount,
-		)
-		if err != nil {
-			s.logger.Error("failed to scan message", "error", err)
+		msg, scanErr := scanPostgresMessage(rows)
+		if scanErr != nil {
+			s.logger.Error("failed to scan message", "error", scanErr)
 			continue
 		}
 
-		if len(metadata) > 0 {
-			if err := json.Unmarshal(metadata, &msg.Metadata); err != nil {
-				s.logger.Error("failed to unmarshal metadata", "error", err)
-				continue
-			}
-		}
-
-		// Publish to transport
-		if publishErr := publishScheduledMessage(ctx, s.transport, &msg); publishErr != nil {
+		if publishErr := publishScheduledMessage(ctx, s.transport, msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
 				"id", msg.ID,
 				"event", msg.EventName,
 				"error", publishErr,
 				"retry_count", msg.RetryCount)
-
-			decision := handleDeliveryFailure(ctx, s.opts, &msg, publishErr, s.logger)
+			decision := handleDeliveryFailure(ctx, s.opts, msg, publishErr, s.logger)
 			if decision.sendToDLQ {
 				toDiscard = append(toDiscard, msg.ID)
-				continue
+			} else {
+				toRetry = append(toRetry, retryUpdate{
+					ID:         msg.ID,
+					RetryCount: decision.retryCount,
+					NextRetry:  decision.nextRetryAt,
+				})
 			}
-
-			toRetry = append(toRetry, retryUpdate{
-				ID:         msg.ID,
-				RetryCount: decision.retryCount,
-				NextRetry:  decision.nextRetryAt,
-			})
 			continue
 		}
 
 		toDelete = append(toDelete, msg.ID)
-
-		// Record delivery metrics
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
-
-		s.logger.Debug("delivered scheduled message",
-			"id", msg.ID,
-			"event", msg.EventName)
+		s.logger.Debug("delivered scheduled message", "id", msg.ID, "event", msg.EventName)
 	}
 
-	if err := rows.Err(); err != nil {
-		s.logger.Error("failed to iterate rows", "error", err)
-		return 0
+	if rowErr := rows.Err(); rowErr != nil {
+		s.logger.Error("failed to iterate rows", "error", rowErr)
+		return nil, nil, nil, rowErr
 	}
+	return toDelete, toDiscard, toRetry, nil
+}
 
-	// Delete delivered messages
+// scanPostgresMessage scans one row into a Message, including JSON metadata.
+func scanPostgresMessage(rows *sql.Rows) (*Message, error) {
+	var msg Message
+	var metadata []byte
+	if err := rows.Scan(
+		&msg.ID, &msg.EventName, &msg.Payload,
+		&metadata, &msg.ScheduledAt, &msg.CreatedAt, &msg.RetryCount,
+	); err != nil {
+		return nil, err
+	}
+	if len(metadata) > 0 {
+		if err := json.Unmarshal(metadata, &msg.Metadata); err != nil {
+			return nil, err
+		}
+	}
+	return &msg, nil
+}
+
+// applyBatchResults applies deletes and retry-updates to the database within the transaction.
+func (s *PostgresScheduler) applyBatchResults(ctx context.Context, tx *sql.Tx, toDelete, toDiscard []string, toRetry []retryUpdate) error {
 	if len(toDelete) > 0 {
-		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table) // #nosec G201 -- table name is set at construction, not user input
-		_, err = tx.ExecContext(ctx, deleteQuery, toDelete)
-		if err != nil {
+		// #nosec G201 -- table name is set at construction, not user input
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDelete); err != nil {
 			s.logger.Error("failed to delete delivered messages", "error", err)
-			return 0
+			return err
 		}
 	}
-
-	// Delete discarded messages (max retries exceeded)
 	if len(toDiscard) > 0 {
-		discardQuery := fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table) // #nosec G201 -- table name is set at construction, not user input
-		_, err = tx.ExecContext(ctx, discardQuery, toDiscard)
-		if err != nil {
+		// #nosec G201 -- table name is set at construction, not user input
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDiscard); err != nil {
 			s.logger.Error("failed to delete discarded messages", "error", err)
-			return 0
+			return err
 		}
 	}
-
-	// Update messages for retry (new scheduled_at + incremented retry_count)
 	for _, r := range toRetry {
-		updateQuery := fmt.Sprintf(
-// #nosec G201 -- table name is set at construction, not user input
-			"UPDATE %s SET retry_count = $1, scheduled_at = $2 WHERE id = $3",
-			s.table)
-		_, err = tx.ExecContext(ctx, updateQuery, r.RetryCount, r.NextRetry, r.ID)
-		if err != nil {
-			s.logger.Error("failed to update message for retry",
-				"id", r.ID,
-				"error", err)
+		// #nosec G201 -- table name is set at construction, not user input
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf("UPDATE %s SET retry_count = $1, scheduled_at = $2 WHERE id = $3", s.table),
+			r.RetryCount, r.NextRetry, r.ID,
+		); err != nil {
+			s.logger.Error("failed to update message for retry", "id", r.ID, "error", err)
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		s.logger.Error("failed to commit transaction", "error", err)
-		return 0
-	}
-
-	return len(toDelete)
-// #nosec G201 -- table name is set at construction, not user input
+	return nil
 }
 
 // EnsureTable creates the scheduled_messages table if it doesn't exist.
