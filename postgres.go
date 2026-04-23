@@ -135,9 +135,12 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		"scheduled_at", msg.ScheduledAt)
 
 	// Notify any listening scheduler loop that a new message has been scheduled.
-	// Ignored if no listener is configured or the notify fails (loop catches up via polling).
+	// Best-effort: polling catches any missed notifications.
 	if s.notifyChannel != "" {
-		_, _ = s.db.ExecContext(ctx, `SELECT pg_notify($1, '')`, s.notifyChannel)
+		if _, err := s.db.ExecContext(ctx, `SELECT pg_notify($1, '')`, s.notifyChannel); err != nil {
+			s.logger.Debug("pg_notify failed, relying on poller",
+				"channel", s.notifyChannel, "error", err)
+		}
 	}
 
 	return nil
