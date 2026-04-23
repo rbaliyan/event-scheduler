@@ -17,6 +17,7 @@ import (
 //   - stopCh: stop channel; fires when Stop() is called
 //   - processFn: called on each process tick; returns the number of messages processed
 //   - recoverFn: called on each recovery tick; nil to disable recovery (e.g., PostgreSQL)
+//   - notifyCh: optional channel for push-based wake-ups (e.g., PG LISTEN/NOTIFY); nil disables
 //   - onExit: called once when the loop exits (e.g., close(stoppedCh))
 func runSchedulerLoop(
 	logger *slog.Logger,
@@ -25,6 +26,7 @@ func runSchedulerLoop(
 	stopCh <-chan struct{},
 	processFn func() int,
 	recoverFn func(),
+	notifyCh <-chan struct{},
 	onExit func(),
 ) {
 	defer onExit()
@@ -63,23 +65,29 @@ func runSchedulerLoop(
 		recoverFn()
 	}
 
+	process := func() {
+		processed := processFn()
+
+		// Adjust poll interval if adaptive polling is enabled
+		if adaptiveState != nil {
+			newInterval := adaptiveState.adjust(processed)
+			if newInterval != currentInterval {
+				currentInterval = newInterval
+				ticker.Reset(currentInterval)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-doneCh:
 			return
 		case <-stopCh:
 			return
+		case <-notifyCh:
+			process()
 		case <-ticker.C:
-			processed := processFn()
-
-			// Adjust poll interval if adaptive polling is enabled
-			if adaptiveState != nil {
-				newInterval := adaptiveState.adjust(processed)
-				if newInterval != currentInterval {
-					currentInterval = newInterval
-					ticker.Reset(currentInterval)
-				}
-			}
+			process()
 		case <-recoveryC:
 			recoverFn()
 		}

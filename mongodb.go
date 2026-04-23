@@ -337,6 +337,7 @@ func (s *MongoScheduler) Start(ctx context.Context) error {
 		s.stopCh,
 		func() int { return s.processDue(ctx) },
 		func() { s.recoverStuck(ctx) },
+		nil, // MongoDB does not support LISTEN/NOTIFY
 		func() { close(s.stoppedCh) },
 	)
 

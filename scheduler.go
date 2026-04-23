@@ -57,6 +57,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/rbaliyan/event/v3/backoff"
 	"github.com/rbaliyan/event/v3/health"
 )
@@ -303,6 +304,12 @@ type options struct {
 	// logger is the logger for scheduler operations.
 	// Default: slog.Default()
 	logger *slog.Logger
+
+	// listener is an optional pq.Listener for PG LISTEN/NOTIFY wake-ups.
+	// When set, the scheduler wakes up immediately on NOTIFY instead of
+	// relying solely on the polling ticker.
+	listener        *pq.Listener
+	notifyChannel   string
 }
 
 // defaultOptions returns default scheduler options.
@@ -609,6 +616,34 @@ func WithStuckDuration(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
 			o.stuckDuration = d
+		}
+	}
+}
+
+// WithNotifyListener configures the PostgreSQL scheduler to wake up immediately
+// on NOTIFY events in addition to its regular polling ticker.
+//
+// When set, the scheduler subscribes to channel on startup and calls processDue
+// each time a notification arrives. The polling ticker stays active as a fallback
+// safety net for notifications missed during a scheduler restart.
+//
+// Pair this with a custom NOTIFY trigger on the scheduled_messages table, or
+// call pg_notify(channel, '') in the same transaction as the Schedule() call.
+// PostgresScheduler.Schedule() emits pg_notify automatically when a listener
+// is configured — no manual trigger is required.
+//
+// Example:
+//
+//	listener := pq.NewListener(dsn, 10*time.Second, time.Minute, nil)
+//	scheduler, _ := NewPostgresScheduler(db, transport,
+//	    WithPollInterval(5*time.Second),          // fallback interval
+//	    WithNotifyListener(listener, "scheduler_due"),
+//	)
+func WithNotifyListener(l *pq.Listener, channel string) Option {
+	return func(o *options) {
+		if l != nil && channel != "" {
+			o.listener = l
+			o.notifyChannel = channel
 		}
 	}
 }
