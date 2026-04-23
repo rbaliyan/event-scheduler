@@ -135,9 +135,12 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		"scheduled_at", msg.ScheduledAt)
 
 	// Notify any listening scheduler loop that a new message has been scheduled.
-	// Ignored if no listener is configured or the notify fails (loop catches up via polling).
+	// Best-effort: polling catches any missed notifications.
 	if s.notifyChannel != "" {
-		_, _ = s.db.ExecContext(ctx, `SELECT pg_notify($1, '')`, s.notifyChannel)
+		if _, err := s.db.ExecContext(ctx, `SELECT pg_notify($1, '')`, s.notifyChannel); err != nil {
+			s.logger.Debug("pg_notify failed, relying on poller",
+				"channel", s.notifyChannel, "error", err)
+		}
 	}
 
 	return nil
@@ -313,6 +316,7 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 	// The listener bridges PG NOTIFY events into a plain struct channel so
 	// runSchedulerLoop stays decoupled from the pq package.
 	var notifyCh <-chan struct{}
+	var bridgeDone <-chan struct{} // non-nil only when the bridge goroutine is running
 	if s.opts.listener != nil {
 		ch := make(chan struct{}, 1)
 		notifyCh = ch
@@ -320,11 +324,16 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 			s.logger.Warn("failed to listen on notify channel, using polling only",
 				"channel", s.opts.notifyChannel, "error", err)
 		} else {
+			done := make(chan struct{})
+			bridgeDone = done
 			go func() {
+				defer close(done)
 				defer func() { _ = s.opts.listener.Unlisten(s.opts.notifyChannel) }()
 				for {
 					select {
 					case <-ctx.Done():
+						return
+					case <-s.stopCh:
 						return
 					case <-s.opts.listener.Notify:
 						select {
@@ -337,6 +346,16 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 		}
 	}
 
+	// onExit waits for the bridge goroutine to finish its Unlisten before
+	// signalling stoppedCh. This ensures Stop() does not return while the
+	// pq.Listener is still subscribed to the channel.
+	onExit := func() {
+		if bridgeDone != nil {
+			<-bridgeDone
+		}
+		close(s.stoppedCh)
+	}
+
 	runSchedulerLoop(
 		s.logger,
 		s.opts,
@@ -345,7 +364,7 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 		func() int { return s.processDue(ctx) },
 		nil, // PostgreSQL uses FOR UPDATE SKIP LOCKED; no stuck recovery needed
 		notifyCh,
-		func() { close(s.stoppedCh) },
+		onExit,
 	)
 
 	if ctx.Err() != nil {
