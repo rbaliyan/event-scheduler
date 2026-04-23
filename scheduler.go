@@ -53,6 +53,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"regexp"
 	"time"
@@ -60,10 +61,90 @@ import (
 	"github.com/lib/pq"
 	"github.com/rbaliyan/event/v3/backoff"
 	"github.com/rbaliyan/event/v3/health"
+	"github.com/robfig/cron/v3"
 )
 
 // validIdentifier matches safe SQL/collection identifiers (alphanumeric and underscores).
 var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// RecurrenceType specifies the kind of recurrence pattern.
+type RecurrenceType string
+
+const (
+	// RecurrenceInterval repeats the message at a fixed interval after each delivery.
+	RecurrenceInterval RecurrenceType = "interval"
+
+	// RecurrenceCron repeats the message according to a standard 5-field cron expression.
+	RecurrenceCron RecurrenceType = "cron"
+)
+
+// Recurrence configures periodic re-delivery of a scheduled message.
+//
+// Exactly one of Interval or Cron must be set (matching Type).
+// The message is re-scheduled after each successful delivery until a
+// termination condition is reached. If no termination condition is set
+// the message recurs indefinitely — call Cancel to stop it.
+//
+// Example — every 24 h for 7 days:
+//
+//	Recurrence: &scheduler.Recurrence{
+//	    Type:           scheduler.RecurrenceInterval,
+//	    Interval:       24 * time.Hour,
+//	    MaxOccurrences: 7,
+//	}
+//
+// Example — 09:00 on weekdays until end of month:
+//
+//	Recurrence: &scheduler.Recurrence{
+//	    Type:  scheduler.RecurrenceCron,
+//	    Cron:  "0 9 * * 1-5",
+//	    Until: endOfMonth,
+//	}
+type Recurrence struct {
+	// Type selects the recurrence pattern (required).
+	Type RecurrenceType
+
+	// Interval is the fixed gap between deliveries.
+	// Required when Type == RecurrenceInterval; must be > 0.
+	Interval time.Duration
+
+	// Cron is a standard 5-field cron expression (minute hour dom month dow).
+	// Required when Type == RecurrenceCron; validated at Schedule() time.
+	Cron string
+
+	// MaxOccurrences is the maximum number of deliveries (0 = unlimited).
+	// When reached the message is deleted after the final delivery.
+	MaxOccurrences int
+
+	// Until stops recurrence after this time (zero = no end date).
+	// If the next computed fire time would be after Until, the message
+	// is deleted after the current delivery.
+	Until time.Time
+}
+
+// validateRecurrence validates the Recurrence field at Schedule() time.
+// Returns nil when r is nil (one-shot message).
+func validateRecurrence(r *Recurrence) error {
+	if r == nil {
+		return nil
+	}
+	switch r.Type {
+	case RecurrenceInterval:
+		if r.Interval <= 0 {
+			return fmt.Errorf("scheduler: recurrence interval must be > 0")
+		}
+	case RecurrenceCron:
+		if _, err := cron.ParseStandard(r.Cron); err != nil {
+			return fmt.Errorf("scheduler: invalid cron expression %q: %w", r.Cron, err)
+		}
+	default:
+		return fmt.Errorf("scheduler: unknown recurrence type %q", r.Type)
+	}
+	if !r.Until.IsZero() && time.Now().After(r.Until) {
+		return fmt.Errorf("scheduler: recurrence Until time %v is in the past", r.Until)
+	}
+	return nil
+}
 
 // Message represents a scheduled message.
 //
@@ -102,6 +183,13 @@ type Message struct {
 	// RetryCount tracks the number of delivery attempts.
 	// This is used internally for backoff calculations.
 	RetryCount int `json:"retry_count,omitempty"`
+
+	// Recurrence configures periodic re-delivery. nil means one-shot.
+	Recurrence *Recurrence `json:"recurrence,omitempty"`
+
+	// OccurrenceCount is the number of times this message has been successfully
+	// delivered so far. Starts at 0; incremented on each successful delivery.
+	OccurrenceCount int `json:"occurrence_count,omitempty"`
 }
 
 // Scheduler schedules messages for future delivery.

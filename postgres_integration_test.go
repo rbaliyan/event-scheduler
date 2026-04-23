@@ -467,3 +467,128 @@ func TestPostgres_Integration_GracefulShutdown(t *testing.T) {
 		t.Fatalf("Start() returned error: %v", err)
 	}
 }
+
+func TestPostgres_Integration_RecurringInterval(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupPostgresScheduler(t, mt)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msg := Message{
+		ID:          "pg-recur-1",
+		EventName:   "recur.interval",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{
+			Type:           RecurrenceInterval,
+			Interval:       200 * time.Millisecond,
+			MaxOccurrences: 3,
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	go sched.Start(ctx)
+
+	// Wait for exactly 3 deliveries
+	pubs := mt.WaitForPublishes(t, 3, 10*time.Second)
+	if len(pubs) != 3 {
+		t.Fatalf("expected 3 deliveries, got %d", len(pubs))
+	}
+	for _, p := range pubs {
+		if p.EventName != "recur.interval" {
+			t.Errorf("unexpected event name: %q", p.EventName)
+		}
+	}
+
+	// After MaxOccurrences, message must be removed from the table
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := sched.Get(ctx, "pg-recur-1")
+		return errors.Is(err, ErrNotFound)
+	}, "recurring message to be deleted after MaxOccurrences")
+}
+
+func TestPostgres_Integration_RecurringInterval_Until(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupPostgresScheduler(t, mt)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msg := Message{
+		ID:          "pg-recur-until-1",
+		EventName:   "recur.until",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{
+			Type:     RecurrenceInterval,
+			Interval: 150 * time.Millisecond,
+			Until:    time.Now().Add(400 * time.Millisecond),
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	go sched.Start(ctx)
+
+	time.Sleep(800 * time.Millisecond)
+	pubs := mt.Published()
+	if len(pubs) == 0 {
+		t.Error("expected at least 1 delivery before Until")
+	}
+
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := sched.Get(ctx, "pg-recur-until-1")
+		return errors.Is(err, ErrNotFound)
+	}, "recurring message to be deleted after Until")
+}
+
+func TestPostgres_Integration_RecurringRoundtrip(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupPostgresScheduler(t, mt)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Schedule, then Get to confirm recurrence fields round-trip through PostgreSQL.
+	msg := Message{
+		ID:          "pg-recur-rt-1",
+		EventName:   "recur.roundtrip",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(time.Hour),
+		Recurrence: &Recurrence{
+			Type:           RecurrenceInterval,
+			Interval:       30 * time.Minute,
+			MaxOccurrences: 7,
+			Until:          time.Now().Add(5 * time.Hour),
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	got, err := sched.Get(ctx, "pg-recur-rt-1")
+	if err != nil {
+		t.Fatalf("Get() error: %v", err)
+	}
+	if got.Recurrence == nil {
+		t.Fatal("expected non-nil Recurrence after round-trip")
+	}
+	if got.Recurrence.Type != RecurrenceInterval {
+		t.Errorf("expected Type=interval, got %v", got.Recurrence.Type)
+	}
+	if got.Recurrence.Interval != 30*time.Minute {
+		t.Errorf("expected Interval=30m, got %v", got.Recurrence.Interval)
+	}
+	if got.Recurrence.MaxOccurrences != 7 {
+		t.Errorf("expected MaxOccurrences=7, got %d", got.Recurrence.MaxOccurrences)
+	}
+	if got.Recurrence.Until.IsZero() {
+		t.Error("expected non-zero Until after round-trip")
+	}
+}

@@ -701,3 +701,86 @@ func TestRedis_Integration_GracefulShutdown(t *testing.T) {
 		t.Fatalf("Start() returned error: %v", err)
 	}
 }
+
+func TestRedis_Integration_RecurringInterval(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupRedisScheduler(t, mt)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msg := Message{
+		ID:          "redis-recur-1",
+		EventName:   "recur.interval",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{
+			Type:           RecurrenceInterval,
+			Interval:       200 * time.Millisecond,
+			MaxOccurrences: 3,
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	go sched.Start(ctx)
+
+	// Wait for exactly 3 deliveries
+	pubs := mt.WaitForPublishes(t, 3, 10*time.Second)
+	if len(pubs) != 3 {
+		t.Fatalf("expected 3 deliveries, got %d", len(pubs))
+	}
+	for _, p := range pubs {
+		if p.EventName != "recur.interval" {
+			t.Errorf("unexpected event name: %q", p.EventName)
+		}
+	}
+
+	// After MaxOccurrences, message must be removed
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := sched.Get(ctx, "redis-recur-1")
+		return errors.Is(err, ErrNotFound)
+	}, "recurring message to be deleted after MaxOccurrences")
+}
+
+func TestRedis_Integration_RecurringInterval_Until(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupRedisScheduler(t, mt)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Until in 400ms, interval 150ms — should fire ~2 times before Until
+	msg := Message{
+		ID:          "redis-recur-until-1",
+		EventName:   "recur.until",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{
+			Type:     RecurrenceInterval,
+			Interval: 150 * time.Millisecond,
+			Until:    time.Now().Add(400 * time.Millisecond),
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	go sched.Start(ctx)
+
+	// Should get at least 1, at most 4 deliveries before Until cuts it off
+	time.Sleep(800 * time.Millisecond)
+	pubs := mt.Published()
+	if len(pubs) == 0 {
+		t.Error("expected at least 1 delivery before Until")
+	}
+
+	// After Until passes, message must be removed
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := sched.Get(ctx, "redis-recur-until-1")
+		return errors.Is(err, ErrNotFound)
+	}, "recurring message to be deleted after Until")
+}

@@ -510,3 +510,123 @@ func TestMongo_Integration_GracefulShutdown(t *testing.T) {
 		t.Fatalf("Start() returned error: %v", err)
 	}
 }
+
+func TestMongo_Integration_RecurringInterval(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupMongoScheduler(t, mt)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msg := Message{
+		ID:          "mongo-recur-1",
+		EventName:   "recur.interval",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{
+			Type:           RecurrenceInterval,
+			Interval:       200 * time.Millisecond,
+			MaxOccurrences: 3,
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	go sched.Start(ctx)
+
+	// Wait for exactly 3 deliveries
+	pubs := mt.WaitForPublishes(t, 3, 10*time.Second)
+	if len(pubs) != 3 {
+		t.Fatalf("expected 3 deliveries, got %d", len(pubs))
+	}
+	for _, p := range pubs {
+		if p.EventName != "recur.interval" {
+			t.Errorf("unexpected event name: %q", p.EventName)
+		}
+	}
+
+	// After MaxOccurrences, message must be removed
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := sched.Get(ctx, "mongo-recur-1")
+		return errors.Is(err, ErrNotFound)
+	}, "recurring message to be deleted after MaxOccurrences")
+}
+
+func TestMongo_Integration_RecurringInterval_Until(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupMongoScheduler(t, mt)
+	defer cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msg := Message{
+		ID:          "mongo-recur-until-1",
+		EventName:   "recur.until",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{
+			Type:     RecurrenceInterval,
+			Interval: 150 * time.Millisecond,
+			Until:    time.Now().Add(400 * time.Millisecond),
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	go sched.Start(ctx)
+
+	time.Sleep(800 * time.Millisecond)
+	pubs := mt.Published()
+	if len(pubs) == 0 {
+		t.Error("expected at least 1 delivery before Until")
+	}
+
+	waitFor(t, 3*time.Second, func() bool {
+		_, err := sched.Get(ctx, "mongo-recur-until-1")
+		return errors.Is(err, ErrNotFound)
+	}, "recurring message to be deleted after Until")
+}
+
+func TestMongo_Integration_RecurringRoundtrip(t *testing.T) {
+	mt := newMockTransport()
+	sched, cleanup := setupMongoScheduler(t, mt)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	msg := Message{
+		ID:          "mongo-recur-rt-1",
+		EventName:   "recur.roundtrip",
+		Payload:     []byte(`{}`),
+		ScheduledAt: time.Now().Add(time.Hour),
+		Recurrence: &Recurrence{
+			Type:           RecurrenceCron,
+			Cron:           "0 9 * * 1-5",
+			MaxOccurrences: 5,
+		},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule() error: %v", err)
+	}
+
+	got, err := sched.Get(ctx, "mongo-recur-rt-1")
+	if err != nil {
+		t.Fatalf("Get() error: %v", err)
+	}
+	if got.Recurrence == nil {
+		t.Fatal("expected non-nil Recurrence after round-trip")
+	}
+	if got.Recurrence.Type != RecurrenceCron {
+		t.Errorf("expected Type=cron, got %v", got.Recurrence.Type)
+	}
+	if got.Recurrence.Cron != "0 9 * * 1-5" {
+		t.Errorf("expected Cron='0 9 * * 1-5', got %q", got.Recurrence.Cron)
+	}
+	if got.Recurrence.MaxOccurrences != 5 {
+		t.Errorf("expected MaxOccurrences=5, got %d", got.Recurrence.MaxOccurrences)
+	}
+}

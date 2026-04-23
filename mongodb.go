@@ -56,41 +56,82 @@ const (
 
 // mongoMessage represents a scheduled message document in MongoDB
 type mongoMessage struct {
-	ID          string            `bson:"_id"`
-	EventName   string            `bson:"event_name"`
-	Payload     []byte            `bson:"payload"`
-	Metadata    map[string]string `bson:"metadata,omitempty"`
-	ScheduledAt time.Time         `bson:"scheduled_at"`
-	CreatedAt   time.Time         `bson:"created_at"`
-	Status      schedulerStatus   `bson:"status,omitempty"`
-	ClaimedAt   *time.Time        `bson:"claimed_at,omitempty"`
-	RetryCount  int               `bson:"retry_count,omitempty"`
+	ID              string            `bson:"_id"`
+	EventName       string            `bson:"event_name"`
+	Payload         []byte            `bson:"payload"`
+	Metadata        map[string]string `bson:"metadata,omitempty"`
+	ScheduledAt     time.Time         `bson:"scheduled_at"`
+	CreatedAt       time.Time         `bson:"created_at"`
+	Status          schedulerStatus   `bson:"status,omitempty"`
+	ClaimedAt       *time.Time        `bson:"claimed_at,omitempty"`
+	RetryCount      int               `bson:"retry_count,omitempty"`
+	RecurrenceType  string            `bson:"recurrence_type,omitempty"`
+	RecurrenceValue string            `bson:"recurrence_value,omitempty"`
+	MaxOccurrences  int               `bson:"max_occurrences,omitempty"`
+	Until           *time.Time        `bson:"until,omitempty"`
+	OccurrenceCount int               `bson:"occurrence_count,omitempty"`
 }
 
 // toMessage converts mongoMessage to Message
 func (m *mongoMessage) toMessage() *Message {
-	return &Message{
-		ID:          m.ID,
-		EventName:   m.EventName,
-		Payload:     m.Payload,
-		Metadata:    m.Metadata,
-		ScheduledAt: m.ScheduledAt,
-		CreatedAt:   m.CreatedAt,
-		RetryCount:  m.RetryCount,
+	msg := &Message{
+		ID:              m.ID,
+		EventName:       m.EventName,
+		Payload:         m.Payload,
+		Metadata:        m.Metadata,
+		ScheduledAt:     m.ScheduledAt,
+		CreatedAt:       m.CreatedAt,
+		RetryCount:      m.RetryCount,
+		OccurrenceCount: m.OccurrenceCount,
 	}
+	if m.RecurrenceType != "" {
+		r := &Recurrence{
+			Type:           RecurrenceType(m.RecurrenceType),
+			MaxOccurrences: m.MaxOccurrences,
+		}
+		switch r.Type {
+		case RecurrenceInterval:
+			if d, err := time.ParseDuration(m.RecurrenceValue); err == nil {
+				r.Interval = d
+			}
+		case RecurrenceCron:
+			r.Cron = m.RecurrenceValue
+		}
+		if m.Until != nil {
+			r.Until = *m.Until
+		}
+		msg.Recurrence = r
+	}
+	return msg
 }
 
 // fromMessage creates a mongoMessage from Message
 func fromMessage(m *Message) *mongoMessage {
-	return &mongoMessage{
-		ID:          m.ID,
-		EventName:   m.EventName,
-		Payload:     m.Payload,
-		Metadata:    m.Metadata,
-		ScheduledAt: m.ScheduledAt,
-		CreatedAt:   m.CreatedAt,
-		RetryCount:  m.RetryCount,
+	mm := &mongoMessage{
+		ID:              m.ID,
+		EventName:       m.EventName,
+		Payload:         m.Payload,
+		Metadata:        m.Metadata,
+		ScheduledAt:     m.ScheduledAt,
+		CreatedAt:       m.CreatedAt,
+		RetryCount:      m.RetryCount,
+		OccurrenceCount: m.OccurrenceCount,
 	}
+	if r := m.Recurrence; r != nil {
+		mm.RecurrenceType = string(r.Type)
+		switch r.Type {
+		case RecurrenceInterval:
+			mm.RecurrenceValue = r.Interval.String()
+		case RecurrenceCron:
+			mm.RecurrenceValue = r.Cron
+		}
+		mm.MaxOccurrences = r.MaxOccurrences
+		if !r.Until.IsZero() {
+			u := r.Until
+			mm.Until = &u
+		}
+	}
+	return mm
 }
 
 // MongoScheduler uses MongoDB for scheduling
@@ -190,6 +231,10 @@ func (s *MongoScheduler) Schedule(ctx context.Context, msg Message) error {
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
+	}
+
+	if err := validateRecurrence(msg.Recurrence); err != nil {
+		return err
 	}
 
 	mongoMsg := fromMessage(&msg)
@@ -393,13 +438,19 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 			continue
 		}
 
-		if err := s.deleteClaimed(ctx, msg.ID); err != nil {
-			s.logger.Error("failed to delete published message", "id", msg.ID, "error", err)
-		}
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
 		s.logger.Debug("delivered scheduled message", "id", msg.ID, "event", msg.EventName)
+
+		outcome := handleSuccessfulDelivery(ctx, s.opts, msg, time.Now())
+		if outcome.terminal {
+			if err := s.deleteClaimed(ctx, msg.ID); err != nil {
+				s.logger.Error("failed to delete published message", "id", msg.ID, "error", err)
+			}
+		} else {
+			s.rescheduleRecurring(ctx, msg, outcome)
+		}
 		processed++
 	}
 	return processed
@@ -455,6 +506,22 @@ func (s *MongoScheduler) claimDue(ctx context.Context, now time.Time) (*Message,
 	}
 
 	return mongoMsg.toMessage(), nil
+}
+
+// rescheduleRecurring updates a successfully delivered recurring message for its next occurrence.
+func (s *MongoScheduler) rescheduleRecurring(ctx context.Context, msg *Message, outcome recurrenceOutcome) {
+	_, updateErr := s.collection.UpdateByID(ctx, msg.ID, bson.M{
+		"$set": bson.M{
+			"status":           statusPending,
+			"scheduled_at":     outcome.nextAt,
+			"occurrence_count": outcome.newCount,
+			"retry_count":      0,
+		},
+		"$unset": bson.M{"claimed_at": ""},
+	})
+	if updateErr != nil {
+		s.logger.Error("failed to reschedule recurring message", "id", msg.ID, "error", updateErr)
+	}
 }
 
 // deleteClaimed deletes a message that was successfully published

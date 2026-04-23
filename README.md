@@ -12,6 +12,7 @@ A production-grade delayed and scheduled message delivery library for Go. Schedu
 ## Features
 
 - **Delayed Message Delivery**: Schedule messages for delivery at a specific time or after a delay
+- **Recurring Messages**: Repeat delivery at a fixed interval or on a cron schedule, with optional MaxOccurrences and Until termination conditions
 - **Multiple Storage Backends**: Redis, PostgreSQL, and MongoDB implementations
 - **High Availability Safe**: Uses atomic operations and 2-phase commit for crash safety
 - **Automatic Recovery**: Recovers messages stuck in processing state after scheduler crashes
@@ -223,13 +224,15 @@ type Scheduler interface {
 
 ```go
 type Message struct {
-    ID          string            // Unique identifier (auto-generated if empty)
-    EventName   string            // Event/topic to publish when delivered
-    Payload     []byte            // Message data (typically JSON)
-    Metadata    map[string]string // Additional key-value pairs
-    ScheduledAt time.Time         // When to deliver the message
-    CreatedAt   time.Time         // When the message was scheduled
-    RetryCount  int               // Number of delivery attempts (managed internally)
+    ID              string            // Unique identifier (auto-generated if empty)
+    EventName       string            // Event/topic to publish when delivered
+    Payload         []byte            // Message data (typically JSON)
+    Metadata        map[string]string // Additional key-value pairs
+    ScheduledAt     time.Time         // When to deliver the message
+    CreatedAt       time.Time         // When the message was scheduled
+    RetryCount      int               // Number of delivery attempts (managed internally)
+    Recurrence      *Recurrence       // Optional: repeat delivery periodically
+    OccurrenceCount int               // How many times this message has been delivered
 }
 ```
 
@@ -295,6 +298,53 @@ messages, err := sched.List(ctx, scheduler.Filter{
     After: time.Now(),
 })
 ```
+
+## Recurring Messages
+
+Set `Recurrence` on a `Message` to repeat delivery periodically. After each successful delivery the scheduler reschedules the message automatically. The message is deleted when a termination condition is reached or when `Cancel` is called.
+
+### Fixed interval
+
+```go
+err = sched.Schedule(ctx, scheduler.Message{
+    EventName:   "reports.weekly",
+    Payload:     payload,
+    ScheduledAt: nextMonday,
+    Recurrence: &scheduler.Recurrence{
+        Type:           scheduler.RecurrenceInterval,
+        Interval:       7 * 24 * time.Hour, // every week
+        MaxOccurrences: 4,                   // stop after 4 deliveries
+    },
+})
+```
+
+### Cron schedule
+
+```go
+err = sched.Schedule(ctx, scheduler.Message{
+    EventName:   "reminders.daily",
+    Payload:     payload,
+    ScheduledAt: time.Now(),
+    Recurrence: &scheduler.Recurrence{
+        Type:  scheduler.RecurrenceCron,
+        Cron:  "0 9 * * 1-5", // 09:00 Mon-Fri
+        Until: endOfQuarter,   // stop after this date
+    },
+})
+```
+
+### Termination conditions
+
+| Field | Description |
+|-------|-------------|
+| `MaxOccurrences` | Delete after this many deliveries (0 = unlimited) |
+| `Until` | Delete when the next fire time would be after this timestamp (zero = no end) |
+
+If neither condition is set the message recurs indefinitely — call `Cancel(ctx, id)` to stop it.
+
+### Recurrence across backends
+
+All three backends (Redis, PostgreSQL, MongoDB) support recurring messages with identical behaviour. For PostgreSQL, call `MigrateAddRecurrence(ctx)` on existing tables that pre-date this feature.
 
 ## gRPC and HTTP API
 
@@ -438,6 +488,7 @@ Available metrics:
 - `scheduled_messages_cancelled_total` - counter of cancelled messages
 - `scheduled_messages_recovered_total` - counter of stuck messages recovered
 - `scheduled_messages_dlq_total` - counter of messages sent to DLQ
+- `scheduled_messages_rescheduled_total` - counter of recurring message reschedules
 - `scheduled_messages_pending` - gauge of pending messages
 - `scheduled_messages_stuck` - gauge of stuck messages
 - `schedule_delivery_delay_seconds` - histogram of delivery delay
@@ -464,7 +515,9 @@ Available metrics:
 - Uses `FOR UPDATE SKIP LOCKED` for safe concurrent processing
 - Transactional batch processing
 - Index on `scheduled_at` for efficient queries
-- Use `EnsureTable()` to auto-create schema, or `MigrateAddRetryCount()` for existing tables
+- Use `EnsureTable()` to auto-create schema
+- Use `MigrateAddRetryCount()` to add retry_count to tables created before v0.5.0
+- Use `MigrateAddRecurrence()` to add recurrence columns to tables created before v0.7.0
 
 ## High Availability
 
