@@ -14,6 +14,8 @@ import (
 	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/health"
 	"github.com/rbaliyan/event/v3/transport"
+
+	_ "github.com/lib/pq" // ensure pq driver is registered; pq.Listener is used via opts.listener
 )
 
 /*
@@ -34,14 +36,15 @@ CREATE INDEX idx_scheduled_due ON scheduled_messages(scheduled_at);
 
 // PostgresScheduler uses PostgreSQL for scheduling
 type PostgresScheduler struct {
-	db        *sql.DB
-	transport transport.Transport
-	opts      *options
-	table     string
-	logger    *slog.Logger
-	stopCh    chan struct{}
-	stoppedCh chan struct{}
-	stopOnce  sync.Once
+	db            *sql.DB
+	transport     transport.Transport
+	opts          *options
+	table         string
+	logger        *slog.Logger
+	stopCh        chan struct{}
+	stoppedCh     chan struct{}
+	stopOnce      sync.Once
+	notifyChannel string // empty = no NOTIFY on Schedule
 }
 
 // NewPostgresScheduler creates a new PostgreSQL-based scheduler.
@@ -70,13 +73,14 @@ func NewPostgresScheduler(db *sql.DB, t transport.Transport, opts ...Option) (*P
 	}
 
 	return &PostgresScheduler{
-		db:        db,
-		transport: t,
-		opts:      o,
-		table:     o.table,
-		logger:    o.logger.With("component", "scheduler.postgres"),
-		stopCh:    make(chan struct{}),
-		stoppedCh: make(chan struct{}),
+		db:            db,
+		transport:     t,
+		opts:          o,
+		table:         o.table,
+		logger:        o.logger.With("component", "scheduler.postgres"),
+		stopCh:        make(chan struct{}),
+		stoppedCh:     make(chan struct{}),
+		notifyChannel: o.notifyChannel,
 	}, nil
 }
 
@@ -129,6 +133,12 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		"id", msg.ID,
 		"event", msg.EventName,
 		"scheduled_at", msg.ScheduledAt)
+
+	// Notify any listening scheduler loop that a new message has been scheduled.
+	// Ignored if no listener is configured or the notify fails (loop catches up via polling).
+	if s.notifyChannel != "" {
+		_, _ = s.db.ExecContext(ctx, `SELECT pg_notify($1, '')`, s.notifyChannel)
+	}
 
 	return nil
 }
@@ -299,6 +309,34 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 func (s *PostgresScheduler) Start(ctx context.Context) error {
 	s.setupMetricsCallbacks(ctx)
 
+	// Build notify channel if a pq.Listener is configured.
+	// The listener bridges PG NOTIFY events into a plain struct channel so
+	// runSchedulerLoop stays decoupled from the pq package.
+	var notifyCh <-chan struct{}
+	if s.opts.listener != nil {
+		ch := make(chan struct{}, 1)
+		notifyCh = ch
+		if err := s.opts.listener.Listen(s.opts.notifyChannel); err != nil {
+			s.logger.Warn("failed to listen on notify channel, using polling only",
+				"channel", s.opts.notifyChannel, "error", err)
+		} else {
+			go func() {
+				defer func() { _ = s.opts.listener.Unlisten(s.opts.notifyChannel) }()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-s.opts.listener.Notify:
+						select {
+						case ch <- struct{}{}:
+						default: // coalesce multiple rapid notifications
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	runSchedulerLoop(
 		s.logger,
 		s.opts,
@@ -306,6 +344,7 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 		s.stopCh,
 		func() int { return s.processDue(ctx) },
 		nil, // PostgreSQL uses FOR UPDATE SKIP LOCKED; no stuck recovery needed
+		notifyCh,
 		func() { close(s.stoppedCh) },
 	)
 

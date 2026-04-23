@@ -340,6 +340,7 @@ func (s *RedisScheduler) Start(ctx context.Context) error {
 		s.stopCh,
 		func() int { return s.processDue(ctx) },
 		func() { s.recoverStuck(ctx) },
+		nil, // Redis does not use PG LISTEN/NOTIFY
 		func() { close(s.stoppedCh) },
 	)
 
