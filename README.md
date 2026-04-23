@@ -42,7 +42,8 @@ import (
     "time"
 
     "github.com/google/uuid"
-    "github.com/rbaliyan/event-scheduler"
+    scheduler "github.com/rbaliyan/event-scheduler"
+    "github.com/rbaliyan/event/v3/transport/channel"
     "github.com/redis/go-redis/v9"
 )
 
@@ -54,8 +55,11 @@ func main() {
         Addr: "localhost:6379",
     })
 
+    // Create transport (use your preferred transport: channel, Redis, NATS, etc.)
+    t := channel.New()
+
     // Create scheduler with your transport
-    sched, err := scheduler.NewRedisScheduler(rdb, transport,
+    sched, err := scheduler.NewRedisScheduler(rdb, t,
         scheduler.WithPollInterval(100*time.Millisecond),
         scheduler.WithBatchSize(100),
     )
@@ -99,7 +103,8 @@ import (
     "context"
     "time"
 
-    "github.com/rbaliyan/event-scheduler"
+    scheduler "github.com/rbaliyan/event-scheduler"
+    "github.com/rbaliyan/event/v3/transport/channel"
     "go.mongodb.org/mongo-driver/v2/mongo"
     mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -114,8 +119,11 @@ func main() {
     }
     db := client.Database("myapp")
 
+    // Create transport (use your preferred transport: channel, Redis, NATS, etc.)
+    t := channel.New()
+
     // Create scheduler with custom collection name
-    sched, err := scheduler.NewMongoScheduler(db, transport,
+    sched, err := scheduler.NewMongoScheduler(db, t,
         scheduler.WithPollInterval(100*time.Millisecond),
         scheduler.WithCollection("scheduled_jobs"),
     )
@@ -145,7 +153,8 @@ import (
     "database/sql"
     "time"
 
-    "github.com/rbaliyan/event-scheduler"
+    scheduler "github.com/rbaliyan/event-scheduler"
+    "github.com/rbaliyan/event/v3/transport/channel"
     _ "github.com/lib/pq"
 )
 
@@ -158,8 +167,11 @@ func main() {
         panic(err)
     }
 
+    // Create transport (use your preferred transport: channel, Redis, NATS, etc.)
+    t := channel.New()
+
     // Create scheduler with custom table name
-    sched, err := scheduler.NewPostgresScheduler(db, transport,
+    sched, err := scheduler.NewPostgresScheduler(db, t,
         scheduler.WithPollInterval(100*time.Millisecond),
         scheduler.WithTable("my_scheduled_jobs"),
     )
@@ -385,7 +397,8 @@ All three backends support identical retry behavior:
 ```go
 import "github.com/rbaliyan/event/v3/backoff"
 
-sched := scheduler.NewRedisScheduler(rdb, transport,
+// t is your transport.Transport (e.g. channel.New(), redis transport, etc.)
+sched := scheduler.NewRedisScheduler(rdb, t,
     scheduler.WithBackoff(&backoff.Exponential{
         Initial:    time.Second,
         Multiplier: 2.0,
@@ -411,7 +424,8 @@ metrics, err := scheduler.NewMetrics(
     scheduler.WithNamespace("orders"),
     scheduler.WithMeterProvider(provider),
 )
-sched := scheduler.NewRedisScheduler(rdb, transport,
+// t is your transport.Transport (e.g. channel.New(), redis transport, etc.)
+sched := scheduler.NewRedisScheduler(rdb, t,
     scheduler.WithMetrics(metrics),
 )
 sched.SetupMetricsCallbacks(ctx)
@@ -463,7 +477,8 @@ All implementations support running multiple scheduler instances for high availa
 
 ```go
 // Configure stuck message recovery timeout via constructor option
-sched, err := scheduler.NewRedisScheduler(rdb, transport,
+// t is your transport.Transport (e.g. channel.New(), redis transport, etc.)
+sched, err := scheduler.NewRedisScheduler(rdb, t,
     scheduler.WithStuckDuration(10 * time.Minute),
 )
 ```
