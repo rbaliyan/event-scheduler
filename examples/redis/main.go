@@ -61,7 +61,7 @@ func main() {
 		logger.Error("failed to create metrics", "error", err)
 		os.Exit(1)
 	}
-	defer metrics.Close()
+	defer func() { _ = metrics.Close() }()
 
 	// --- Scheduler ---
 	sched, err := scheduler.NewRedisScheduler(rdb, t,
