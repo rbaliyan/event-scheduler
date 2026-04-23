@@ -30,12 +30,13 @@ type Metrics struct {
 	meter metric.Meter
 
 	// Counters
-	scheduledTotal metric.Int64Counter
-	deliveredTotal metric.Int64Counter
-	failedTotal    metric.Int64Counter
-	cancelledTotal metric.Int64Counter
-	recoveredTotal metric.Int64Counter
-	dlqSentTotal   metric.Int64Counter
+	scheduledTotal    metric.Int64Counter
+	deliveredTotal    metric.Int64Counter
+	failedTotal       metric.Int64Counter
+	cancelledTotal    metric.Int64Counter
+	recoveredTotal    metric.Int64Counter
+	dlqSentTotal      metric.Int64Counter
+	rescheduledTotal  metric.Int64Counter
 
 	// Gauges (using UpDownCounter for gauge-like behavior)
 	pendingMessages metric.Int64ObservableGauge
@@ -169,6 +170,15 @@ func NewMetrics(opts ...MetricsOption) (*Metrics, error) {
 		prefix+"scheduled_messages_dlq_total",
 		metric.WithDescription("Total number of messages sent to dead-letter queue"),
 		metric.WithUnit("{message}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.rescheduledTotal, err = meter.Int64Counter(
+		prefix+"scheduled_messages_rescheduled_total",
+		metric.WithDescription("Total number of times a recurring message was rescheduled for the next occurrence"),
+		metric.WithUnit("{occurrence}"),
 	)
 	if err != nil {
 		return nil, err
@@ -361,6 +371,16 @@ func (m *Metrics) RecordRecovered(ctx context.Context, count int64) {
 	if count > 0 {
 		m.recoveredTotal.Add(ctx, count)
 	}
+}
+
+// RecordRescheduled records that a recurring message was rescheduled for its next occurrence.
+func (m *Metrics) RecordRescheduled(ctx context.Context, eventName string) {
+	if m == nil {
+		return
+	}
+	m.rescheduledTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("event", eventName),
+	))
 }
 
 // RecordDLQSent records that a message was sent to the dead-letter queue.

@@ -92,6 +92,9 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 	if msg.ScheduledAt.IsZero() {
 		return fmt.Errorf("schedule: scheduled_at must not be zero")
 	}
+	if err := validateRecurrence(msg.Recurrence); err != nil {
+		return err
+	}
 	if msg.ID == "" {
 		msg.ID = uuid.New().String()
 	}
@@ -104,10 +107,13 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
+	recType, recVal, maxOcc, until := encodeRecurrence(msg.Recurrence)
+
 	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
-		INSERT INTO %s (id, event_name, payload, metadata, scheduled_at, created_at, retry_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO %s (id, event_name, payload, metadata, scheduled_at, created_at, retry_count,
+		                recurrence_type, recurrence_value, max_occurrences, until, occurrence_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`, s.table)
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -118,6 +124,7 @@ func (s *PostgresScheduler) Schedule(ctx context.Context, msg Message) error {
 		msg.ScheduledAt,
 		msg.CreatedAt,
 		msg.RetryCount,
+		recType, recVal, maxOcc, until, msg.OccurrenceCount,
 	)
 
 	if err != nil {
@@ -187,13 +194,17 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 	}
 	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
+		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count,
+		       recurrence_type, recurrence_value, max_occurrences, until, occurrence_count
 		FROM %s
 		WHERE id = $1
 	`, s.table)
 
 	var msg Message
 	var metadata []byte
+	var recType, recVal sql.NullString
+	var maxOcc, occCount sql.NullInt32
+	var until sql.NullTime
 
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&msg.ID,
@@ -203,6 +214,7 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 		&msg.ScheduledAt,
 		&msg.CreatedAt,
 		&msg.RetryCount,
+		&recType, &recVal, &maxOcc, &until, &occCount,
 	)
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -217,6 +229,10 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 			return nil, fmt.Errorf("unmarshal metadata: %w", err)
 		}
 	}
+	msg.Recurrence = decodeRecurrence(recType, recVal, maxOcc, until)
+	if occCount.Valid {
+		msg.OccurrenceCount = int(occCount.Int32)
+	}
 
 	return &msg, nil
 }
@@ -225,7 +241,8 @@ func (s *PostgresScheduler) Get(ctx context.Context, id string) (*Message, error
 // List returns scheduled messages
 func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message, error) {
 	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
+		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count,
+		       recurrence_type, recurrence_value, max_occurrences, until, occurrence_count
 		FROM %s
 		WHERE 1=1
 	`, s.table)
@@ -274,6 +291,9 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 	for rows.Next() {
 		var msg Message
 		var metadata []byte
+		var recType, recVal sql.NullString
+		var maxOcc, occCount sql.NullInt32
+		var until sql.NullTime
 
 		err := rows.Scan(
 			&msg.ID,
@@ -283,6 +303,7 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 			&msg.ScheduledAt,
 			&msg.CreatedAt,
 			&msg.RetryCount,
+			&recType, &recVal, &maxOcc, &until, &occCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
@@ -292,6 +313,10 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 			if err := json.Unmarshal(metadata, &msg.Metadata); err != nil {
 				return nil, fmt.Errorf("unmarshal metadata: %w", err)
 			}
+		}
+		msg.Recurrence = decodeRecurrence(recType, recVal, maxOcc, until)
+		if occCount.Valid {
+			msg.OccurrenceCount = int(occCount.Int32)
 		}
 
 		messages = append(messages, &msg)
@@ -394,6 +419,13 @@ type retryUpdate struct {
 	NextRetry  time.Time
 }
 
+// recurrenceUpdate holds the reschedule state for a successfully delivered recurring message.
+type recurrenceUpdate struct {
+	ID              string
+	NextAt          time.Time
+	OccurrenceCount int
+}
+
 // processDue processes messages that are due for delivery.
 // Returns the number of messages processed (for adaptive polling).
 func (s *PostgresScheduler) processDue(ctx context.Context) int {
@@ -412,12 +444,12 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	}
 	defer func() { _ = rows.Close() }()
 
-	toDelete, toDiscard, toRetry, err := s.collectBatch(ctx, rows)
+	toDelete, toDiscard, toRetry, toRecur, err := s.collectBatch(ctx, rows)
 	if err != nil {
 		return 0
 	}
 
-	if err := s.applyBatchResults(ctx, tx, toDelete, toDiscard, toRetry); err != nil {
+	if err := s.applyBatchResults(ctx, tx, toDelete, toDiscard, toRetry, toRecur); err != nil {
 		return 0
 	}
 
@@ -433,7 +465,8 @@ func (s *PostgresScheduler) processDue(ctx context.Context) int {
 func (s *PostgresScheduler) queryDue(ctx context.Context, tx *sql.Tx) (*sql.Rows, error) {
 	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count
+		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count,
+		       recurrence_type, recurrence_value, max_occurrences, until, occurrence_count
 		FROM %s
 		WHERE scheduled_at <= $1
 		ORDER BY scheduled_at ASC
@@ -448,8 +481,8 @@ func (s *PostgresScheduler) queryDue(ctx context.Context, tx *sql.Tx) (*sql.Rows
 	return rows, nil
 }
 
-// collectBatch iterates rows and classifies each message as delivered, discarded, or to retry.
-func (s *PostgresScheduler) collectBatch(ctx context.Context, rows *sql.Rows) (toDelete, toDiscard []string, toRetry []retryUpdate, err error) {
+// collectBatch iterates rows and classifies each message as delivered, discarded, to retry, or to recur.
+func (s *PostgresScheduler) collectBatch(ctx context.Context, rows *sql.Rows) (toDelete, toDiscard []string, toRetry []retryUpdate, toRecur []recurrenceUpdate, err error) {
 	for rows.Next() {
 		processingStart := time.Now()
 
@@ -478,27 +511,41 @@ func (s *PostgresScheduler) collectBatch(ctx context.Context, rows *sql.Rows) (t
 			continue
 		}
 
-		toDelete = append(toDelete, msg.ID)
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
 		s.logger.Debug("delivered scheduled message", "id", msg.ID, "event", msg.EventName)
+
+		outcome := handleSuccessfulDelivery(ctx, s.opts, msg, time.Now())
+		if outcome.terminal {
+			toDelete = append(toDelete, msg.ID)
+		} else {
+			toRecur = append(toRecur, recurrenceUpdate{
+				ID:              msg.ID,
+				NextAt:          outcome.nextAt,
+				OccurrenceCount: outcome.newCount,
+			})
+		}
 	}
 
 	if rowErr := rows.Err(); rowErr != nil {
 		s.logger.Error("failed to iterate rows", "error", rowErr)
-		return nil, nil, nil, rowErr
+		return nil, nil, nil, nil, rowErr
 	}
-	return toDelete, toDiscard, toRetry, nil
+	return toDelete, toDiscard, toRetry, toRecur, nil
 }
 
-// scanPostgresMessage scans one row into a Message, including JSON metadata.
+// scanPostgresMessage scans one row into a Message, including JSON metadata and recurrence fields.
 func scanPostgresMessage(rows *sql.Rows) (*Message, error) {
 	var msg Message
 	var metadata []byte
+	var recType, recVal sql.NullString
+	var maxOcc, occCount sql.NullInt32
+	var until sql.NullTime
 	if err := rows.Scan(
 		&msg.ID, &msg.EventName, &msg.Payload,
 		&metadata, &msg.ScheduledAt, &msg.CreatedAt, &msg.RetryCount,
+		&recType, &recVal, &maxOcc, &until, &occCount,
 	); err != nil {
 		return nil, err
 	}
@@ -507,11 +554,15 @@ func scanPostgresMessage(rows *sql.Rows) (*Message, error) {
 			return nil, err
 		}
 	}
+	msg.Recurrence = decodeRecurrence(recType, recVal, maxOcc, until)
+	if occCount.Valid {
+		msg.OccurrenceCount = int(occCount.Int32)
+	}
 	return &msg, nil
 }
 
-// applyBatchResults applies deletes and retry-updates to the database within the transaction.
-func (s *PostgresScheduler) applyBatchResults(ctx context.Context, tx *sql.Tx, toDelete, toDiscard []string, toRetry []retryUpdate) error {
+// applyBatchResults applies deletes, retry-updates, and recurrence-reschedules within the transaction.
+func (s *PostgresScheduler) applyBatchResults(ctx context.Context, tx *sql.Tx, toDelete, toDiscard []string, toRetry []retryUpdate, toRecur []recurrenceUpdate) error {
 	if len(toDelete) > 0 {
 		// #nosec G201 -- table name is set at construction, not user input
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDelete); err != nil {
@@ -535,6 +586,16 @@ func (s *PostgresScheduler) applyBatchResults(ctx context.Context, tx *sql.Tx, t
 			s.logger.Error("failed to update message for retry", "id", r.ID, "error", err)
 		}
 	}
+	for _, r := range toRecur {
+		// Reset retry_count so the next occurrence gets a fresh retry window.
+		// #nosec G201 -- table name is set at construction, not user input
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf("UPDATE %s SET scheduled_at = $1, occurrence_count = $2, retry_count = 0 WHERE id = $3", s.table),
+			r.NextAt, r.OccurrenceCount, r.ID,
+		); err != nil {
+			s.logger.Error("failed to reschedule recurring message", "id", r.ID, "error", err)
+		}
+	}
 	return nil
 }
 
@@ -542,13 +603,18 @@ func (s *PostgresScheduler) applyBatchResults(ctx context.Context, tx *sql.Tx, t
 func (s *PostgresScheduler) EnsureTable(ctx context.Context) error {
 	query := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
-			id           VARCHAR(36) PRIMARY KEY,
-			event_name   VARCHAR(255) NOT NULL,
-			payload      BYTEA NOT NULL,
-			metadata     JSONB,
-			scheduled_at TIMESTAMP NOT NULL,
-			created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-			retry_count  INTEGER NOT NULL DEFAULT 0
+			id               VARCHAR(36) PRIMARY KEY,
+			event_name       VARCHAR(255) NOT NULL,
+			payload          BYTEA NOT NULL,
+			metadata         JSONB,
+			scheduled_at     TIMESTAMP NOT NULL,
+			created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+			retry_count      INTEGER NOT NULL DEFAULT 0,
+			recurrence_type  VARCHAR(10),
+			recurrence_value TEXT,
+			max_occurrences  INTEGER NOT NULL DEFAULT 0,
+			until            TIMESTAMP,
+			occurrence_count INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_%s_scheduled_due ON %s(scheduled_at);
 	`, s.table, s.table, s.table)
@@ -561,6 +627,22 @@ func (s *PostgresScheduler) EnsureTable(ctx context.Context) error {
 func (s *PostgresScheduler) MigrateAddRetryCount(ctx context.Context) error {
 	query := fmt.Sprintf( // #nosec G201 -- table name is set at construction, not user input
 		"ALTER TABLE %s ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
+		s.table)
+	_, err := s.db.ExecContext(ctx, query)
+	return err
+}
+
+// MigrateAddRecurrence adds the five recurrence columns to an existing table.
+// Safe to call multiple times; uses ADD COLUMN IF NOT EXISTS.
+// Call this when upgrading from a version that pre-dates recurrence support.
+func (s *PostgresScheduler) MigrateAddRecurrence(ctx context.Context) error {
+	query := fmt.Sprintf( // #nosec G201 -- table name is set at construction, not user input
+		`ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS recurrence_type  VARCHAR(10),
+			ADD COLUMN IF NOT EXISTS recurrence_value TEXT,
+			ADD COLUMN IF NOT EXISTS max_occurrences  INTEGER NOT NULL DEFAULT 0,
+			ADD COLUMN IF NOT EXISTS until            TIMESTAMP,
+			ADD COLUMN IF NOT EXISTS occurrence_count INTEGER NOT NULL DEFAULT 0`,
 		s.table)
 	_, err := s.db.ExecContext(ctx, query)
 	return err

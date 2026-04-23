@@ -82,3 +82,14 @@ func handleDeliveryFailure(ctx context.Context, opts *options, msg *Message, pub
 		retryCount:  newRetryCount,
 	}
 }
+
+// handleSuccessfulDelivery evaluates what to do after a message is successfully published.
+// For one-shot messages it returns terminal=true (delete).
+// For recurring messages it computes the next fire time and checks termination conditions.
+func handleSuccessfulDelivery(ctx context.Context, opts *options, msg *Message, now time.Time) recurrenceOutcome {
+	outcome := computeNextSchedule(msg, now)
+	if !outcome.terminal && opts.metrics != nil {
+		opts.metrics.RecordRescheduled(ctx, msg.EventName)
+	}
+	return outcome
+}

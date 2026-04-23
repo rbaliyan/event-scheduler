@@ -39,6 +39,21 @@ redis.call('ZADD', KEYS[3], score, msgID)
 return 1
 `)
 
+// rescheduleRecurringScript atomically moves a recurring message from processing
+// back to pending with an updated score and payload.
+// KEYS[1]=messages  KEYS[2]=processing  KEYS[3]=index  KEYS[4]=events:{event_name}
+// ARGV[1]=new_score(unix)  ARGV[2]=json  ARGV[3]=msgID
+var rescheduleRecurringScript = redis.NewScript(`
+local score  = tonumber(ARGV[1])
+local data   = ARGV[2]
+local msgID  = ARGV[3]
+redis.call('ZREM',  KEYS[2], msgID)
+redis.call('ZADD',  KEYS[1], score, msgID)
+redis.call('HSET',  KEYS[3], msgID, data)
+redis.call('ZADD',  KEYS[4], score, msgID)
+return 1
+`)
+
 // claimScript atomically moves one due message from pending to processing and
 // returns {msgID, json} so the caller never needs a second round-trip.
 // KEYS[1]=messages  KEYS[2]=processing  KEYS[3]=index
@@ -151,6 +166,9 @@ func (s *RedisScheduler) Schedule(ctx context.Context, msg Message) error {
 	}
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
+	}
+	if err := validateRecurrence(msg.Recurrence); err != nil {
+		return err
 	}
 
 	data, err := json.Marshal(msg)
@@ -399,19 +417,24 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 			continue
 		}
 
-		// Remove from processing set, index, and per-event set after successful publish
-		pipe := s.client.Pipeline()
-		pipe.ZRem(ctx, s.processingKey(), member)
-		pipe.HDel(ctx, s.indexKey(), msg.ID)
-		pipe.ZRem(ctx, s.eventKey(msg.EventName), msg.ID)
-		if _, err := pipe.Exec(ctx); err != nil {
-			s.logger.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
-		}
-
 		if s.opts.metrics != nil {
 			s.opts.metrics.RecordDelivered(ctx, msg.EventName, msg.ScheduledAt, processingStart)
 		}
 		s.logger.Debug("delivered scheduled message", "id", msg.ID, "event", msg.EventName)
+
+		outcome := handleSuccessfulDelivery(ctx, s.opts, msg, time.Now())
+		if outcome.terminal {
+			// Remove from processing set, index, and per-event set
+			pipe := s.client.Pipeline()
+			pipe.ZRem(ctx, s.processingKey(), member)
+			pipe.HDel(ctx, s.indexKey(), msg.ID)
+			pipe.ZRem(ctx, s.eventKey(msg.EventName), msg.ID)
+			if _, err := pipe.Exec(ctx); err != nil {
+				s.logger.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
+			}
+		} else {
+			s.rescheduleRecurring(ctx, msg, member, outcome)
+		}
 		processed++
 	}
 	return processed
@@ -448,6 +471,25 @@ func (s *RedisScheduler) handlePublishError(ctx context.Context, msg *Message, m
 		msg.ScheduledAt.Unix(), string(updatedData), msg.ID,
 	).Err(); err != nil {
 		s.logger.Error("failed to reschedule for retry", "id", msg.ID, "error", err)
+	}
+}
+
+// rescheduleRecurring atomically moves a successfully delivered recurring message
+// back to pending with the next scheduled time and updated occurrence count.
+func (s *RedisScheduler) rescheduleRecurring(ctx context.Context, msg *Message, member string, outcome recurrenceOutcome) {
+	msg.OccurrenceCount = outcome.newCount
+	msg.ScheduledAt = outcome.nextAt
+	msg.RetryCount = 0
+	updatedData, err := json.Marshal(msg)
+	if err != nil {
+		s.logger.Error("failed to marshal message for recurring reschedule", "id", msg.ID, "error", err)
+		return
+	}
+	if err := rescheduleRecurringScript.Run(ctx, s.client,
+		[]string{s.key(), s.processingKey(), s.indexKey(), s.eventKey(msg.EventName)},
+		outcome.nextAt.Unix(), string(updatedData), msg.ID,
+	).Err(); err != nil {
+		s.logger.Error("failed to reschedule recurring message", "id", msg.ID, "error", err)
 	}
 }
 

@@ -7,6 +7,7 @@
 //   - OpenTelemetry metrics wiring
 //   - Health checking
 //   - Message scheduling, retrieval, listing, and cancellation
+//   - Recurring messages with fixed interval and cron schedule
 //   - Graceful shutdown via OS signal
 package main
 
@@ -164,6 +165,40 @@ func main() {
 		} else {
 			logger.Info("cancelled message", "id", last)
 		}
+	}
+
+	// --- Recurring message: fixed interval ---
+	// This message fires every 24 hours for 7 days, then self-deletes.
+	if err := sched.Schedule(ctx, scheduler.Message{
+		EventName:   "orders.daily-summary",
+		Payload:     []byte(`{"type":"daily"}`),
+		ScheduledAt: time.Now().Add(24 * time.Hour),
+		Recurrence: &scheduler.Recurrence{
+			Type:           scheduler.RecurrenceInterval,
+			Interval:       24 * time.Hour,
+			MaxOccurrences: 7,
+		},
+	}); err != nil {
+		logger.Error("failed to schedule recurring message", "error", err)
+	} else {
+		logger.Info("scheduled recurring daily summary (7 occurrences)")
+	}
+
+	// --- Recurring message: cron schedule ---
+	// Fires at 09:00 on weekdays until end of year.
+	if err := sched.Schedule(ctx, scheduler.Message{
+		EventName:   "reminders.morning",
+		Payload:     []byte(`{"type":"morning"}`),
+		ScheduledAt: time.Now(),
+		Recurrence: &scheduler.Recurrence{
+			Type:  scheduler.RecurrenceCron,
+			Cron:  "0 9 * * 1-5",
+			Until: time.Date(time.Now().Year(), 12, 31, 23, 59, 59, 0, time.UTC),
+		},
+	}); err != nil {
+		logger.Error("failed to schedule cron recurring message", "error", err)
+	} else {
+		logger.Info("scheduled weekday morning reminder (until end of year)")
 	}
 
 	// --- Health check ---

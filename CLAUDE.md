@@ -21,11 +21,12 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 ### Core Components
 
 **Scheduler Interface (scheduler.go)** - Defines the `Scheduler` interface and common types:
-- `Message`: Scheduled message with ID, payload, metadata, delivery time, and retry count
+- `Message`: Scheduled message with ID, payload, metadata, delivery time, retry count, and optional `*Recurrence`
+- `Recurrence`: Periodic re-delivery config — `Type` (`RecurrenceInterval`/`RecurrenceCron`), `Interval`, `Cron`, `MaxOccurrences`, `Until`
 - `Filter`: Criteria for listing scheduled messages
 - `BackoffStrategy`: Interface for retry backoff (compatible with `event/v3/backoff`)
 - `DeadLetterQueue`: Interface for DLQ storage (compatible with `event-dlq` Manager)
-- Option functions: `WithPollInterval`, `WithBatchSize`, `WithKeyPrefix`, `WithTable`, `WithCollection`, `WithMetrics`, `WithBackoff`, `WithMaxRetries`, `WithDLQ`, `WithAdaptivePolling`, `WithMinPollInterval`, `WithMaxPollInterval`
+- Option functions: `WithPollInterval`, `WithBatchSize`, `WithKeyPrefix`, `WithTable`, `WithCollection`, `WithMetrics`, `WithBackoff`, `WithMaxRetries`, `WithDLQ`, `WithAdaptivePolling`, `WithMinPollInterval`, `WithMaxPollInterval`, `WithStuckDuration`, `WithLogger`, `WithNotifyListener`
 
 **Redis Scheduler (redis.go)** - Production-ready Redis implementation:
 - Uses sorted sets with scheduled time as score
@@ -81,7 +82,7 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 ### Data Flow
 
 ```
-Schedule() -> Store message with scheduled time
+Schedule() -> Validate recurrence (if set), store message with scheduled time
     |
 Start() -> Polling loop (at PollInterval)
     |
@@ -91,7 +92,13 @@ processDue() -> Find messages where scheduled_at <= now
     |
     +-> Publish to transport
     |       |
-    |       +-> Success: Delete from storage
+    |       +-> Success: computeNextSchedule()
+    |       |       |
+    |       |       +-> terminal=true (one-shot or termination reached):
+    |       |       |       Delete from storage
+    |       |       |
+    |       |       +-> terminal=false (recurring, next fire computed):
+    |       |               Reschedule at nextAt with updated occurrence_count
     |       |
     |       +-> Failure: Check retry logic
     |               |
@@ -232,29 +239,43 @@ The scheduler publishes messages using the `transport.Transport` interface from 
     "created_at": ISODate,
     "status": string (pending/processing),
     "claimed_at": ISODate (optional),
-    "retry_count": int (optional, default 0)
+    "retry_count": int (optional, default 0),
+    "recurrence_type": string (optional, "interval"|"cron"),
+    "recurrence_value": string (optional, duration string or cron expr),
+    "max_occurrences": int (optional),
+    "until": ISODate (optional),
+    "occurrence_count": int (optional, default 0)
 }
 ```
 
 **PostgreSQL Table** (default: `scheduled_messages`, configurable via `WithTable`)
 ```sql
 CREATE TABLE scheduled_messages (
-    id           VARCHAR(36) PRIMARY KEY,
-    event_name   VARCHAR(255) NOT NULL,
-    payload      BYTEA NOT NULL,
-    metadata     JSONB,
-    scheduled_at TIMESTAMP NOT NULL,
-    created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-    retry_count  INTEGER NOT NULL DEFAULT 0
+    id               VARCHAR(36) PRIMARY KEY,
+    event_name       VARCHAR(255) NOT NULL,
+    payload          BYTEA NOT NULL,
+    metadata         JSONB,
+    scheduled_at     TIMESTAMP NOT NULL,
+    created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+    retry_count      INTEGER NOT NULL DEFAULT 0,
+    recurrence_type  VARCHAR(10),
+    recurrence_value TEXT,
+    max_occurrences  INTEGER NOT NULL DEFAULT 0,
+    until            TIMESTAMP,
+    occurrence_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_scheduled_due ON scheduled_messages(scheduled_at);
 ```
 
-Use `EnsureTable()` to auto-create, or `MigrateAddRetryCount()` to add the column to existing tables.
+Use `EnsureTable()` to auto-create. Migrations for existing tables:
+- `MigrateAddRetryCount()` — adds retry_count (tables pre-v0.5.0)
+- `MigrateAddRecurrence()` — adds the 5 recurrence columns (tables pre-v0.7.0)
 
 **Redis Keys**
-- `{prefix}messages`: Sorted set, score=unix timestamp, member=JSON message
-- `{prefix}processing`: Sorted set for messages being processed
+- `{prefix}messages`: Sorted set, score=unix timestamp, member=msgID
+- `{prefix}processing`: Sorted set, score=claimed_unix, member=msgID
+- `{prefix}index`: Hash, field=msgID, value=JSON (includes recurrence fields)
+- `{prefix}events:{name}`: Per-event sorted set, score=unix timestamp, member=msgID
 
 ## Dependencies
 
