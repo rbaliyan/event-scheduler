@@ -147,11 +147,20 @@ This reduces database load during idle periods while maintaining low latency dur
 The `DeadLetterQueue` interface provides loose coupling to DLQ implementations:
 ```go
 type DeadLetterQueue interface {
-    Store(ctx context.Context, eventName, originalID string, payload []byte,
-          metadata map[string]string, err error, retryCount int, source string) error
+    Store(ctx context.Context, params DLQStoreParams) error
 }
 ```
-The `dlq.Manager` from `github.com/rbaliyan/event-dlq` satisfies this interface.
+Use `DLQFunc` to adapt a `dlq.Manager` from `github.com/rbaliyan/event-dlq` without a direct import:
+```go
+mgr, _ := dlq.NewManager(store, republisher)
+scheduler.WithDLQ(scheduler.DLQFunc(func(ctx context.Context, p scheduler.DLQStoreParams) error {
+    return mgr.Store(ctx, dlq.StoreParams{
+        EventName: p.EventName, OriginalID: p.OriginalID,
+        Payload: p.Payload, Metadata: p.Metadata,
+        Err: p.Err, RetryCount: p.RetryCount, Source: p.Source,
+    })
+}))
+```
 
 ### High Availability Pattern
 

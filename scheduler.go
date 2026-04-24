@@ -308,12 +308,38 @@ type DLQStoreParams struct {
 // DeadLetterQueue defines the interface for dead-letter queue storage.
 // This provides loose coupling so the scheduler doesn't depend directly
 // on the dlq package. The dlq.Manager from github.com/rbaliyan/event-dlq
-// satisfies this interface.
+// satisfies this interface via DLQFunc.
 //
 // Implementations must be safe for concurrent use.
 type DeadLetterQueue interface {
 	// Store adds a failed message to the dead-letter queue.
 	Store(ctx context.Context, params DLQStoreParams) error
+}
+
+// DLQFunc is a functional adapter that lets any function with the right
+// signature implement DeadLetterQueue. It is the idiomatic bridge for
+// connecting a dlq.Manager (from github.com/rbaliyan/event-dlq) without
+// introducing a direct package dependency:
+//
+//	mgr, _ := dlq.NewManager(store, republisher)
+//	sched, _ := scheduler.NewRedisScheduler(client, transport,
+//	    scheduler.WithDLQ(scheduler.DLQFunc(func(ctx context.Context, p scheduler.DLQStoreParams) error {
+//	        return mgr.Store(ctx, dlq.StoreParams{
+//	            EventName:  p.EventName,
+//	            OriginalID: p.OriginalID,
+//	            Payload:    p.Payload,
+//	            Metadata:   p.Metadata,
+//	            Err:        p.Err,
+//	            RetryCount: p.RetryCount,
+//	            Source:     p.Source,
+//	        })
+//	    })),
+//	)
+type DLQFunc func(ctx context.Context, params DLQStoreParams) error
+
+// Store implements DeadLetterQueue.
+func (f DLQFunc) Store(ctx context.Context, params DLQStoreParams) error {
+	return f(ctx, params)
 }
 
 // options configures the scheduler behavior.
