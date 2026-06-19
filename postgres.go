@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,10 +29,19 @@ CREATE TABLE scheduled_messages (
     metadata     JSONB,
     scheduled_at TIMESTAMP NOT NULL,
     created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
-    retry_count  INTEGER NOT NULL DEFAULT 0
+    retry_count  INTEGER NOT NULL DEFAULT 0,
+    status       VARCHAR(20) NOT NULL DEFAULT 'pending',
+    claimed_at   TIMESTAMP
 );
 
-CREATE INDEX idx_scheduled_due ON scheduled_messages(scheduled_at);
+CREATE INDEX idx_scheduled_due ON scheduled_messages(status, scheduled_at);
+
+Like the Redis and MongoDB backends, delivery is a 2-phase claim:
+the claim query atomically flips due rows from 'pending' to 'processing'
+(via UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING), the transport publish
+happens outside any row lock, and a short follow-up statement deletes or
+reschedules each row. recoverStuck moves rows abandoned in 'processing'
+(e.g. after a crash) back to 'pending' once they exceed stuckDuration.
 */
 
 // PostgresScheduler uses PostgreSQL for scheduling
@@ -247,7 +257,7 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 		WHERE 1=1
 	`, s.table)
 
-	var args []interface{}
+	var args []any
 	argIndex := 1
 
 	if filter.EventName != "" {
@@ -329,7 +339,9 @@ func (s *PostgresScheduler) List(ctx context.Context, filter Filter) ([]*Message
 	return messages, nil
 }
 
-// Start begins the scheduler polling loop
+// Start begins the scheduler polling loop.
+// Also periodically recovers messages stuck in "processing" state
+// (from crashed scheduler instances).
 //
 // When adaptive polling is enabled, the poll interval adjusts dynamically:
 // - Decreases when messages are found (more activity expected)
@@ -387,7 +399,7 @@ func (s *PostgresScheduler) Start(ctx context.Context) error {
 		ctx.Done(),
 		s.stopCh,
 		func() int { return s.processDue(ctx) },
-		nil, // PostgreSQL uses FOR UPDATE SKIP LOCKED; no stuck recovery needed
+		func() { s.recoverStuck(ctx) },
 		notifyCh,
 		onExit,
 	)
@@ -427,70 +439,90 @@ type recurrenceUpdate struct {
 }
 
 // processDue processes messages that are due for delivery.
-// Returns the number of messages processed (for adaptive polling).
+//
+// Uses the same 2-phase claim discipline as the Redis and MongoDB backends:
+//  1. Atomically claim due rows (status: pending -> processing) via
+//     UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING, in a short transaction.
+//  2. Publish to the transport outside any row lock, so a slow or blocked
+//     transport never holds locks or a transaction open.
+//  3. Delete or reschedule each row in a short follow-up transaction.
+//
+// If the scheduler crashes after claiming, recoverStuck moves the row back to
+// pending. Returns the number of messages processed (for adaptive polling).
 func (s *PostgresScheduler) processDue(ctx context.Context) int {
 	resetBackoff(s.opts)
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	claimed, err := s.claimDue(ctx)
 	if err != nil {
-		s.logger.Error("failed to begin transaction", "error", err)
+		s.logger.Error("failed to claim due messages", "error", err)
 		return 0
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	rows, err := s.queryDue(ctx, tx)
-	if err != nil {
+	if len(claimed) == 0 {
 		return 0
+	}
+
+	toDelete, toDiscard, toRetry, toRecur := s.deliverBatch(ctx, claimed)
+
+	if err := s.applyBatchResults(ctx, toDelete, toDiscard, toRetry, toRecur); err != nil {
+		s.logger.Error("failed to apply batch results", "error", err)
+		// Rows remain in 'processing' and will be recovered by recoverStuck.
+		return 0
+	}
+
+	// Report every handled message (delivered, discarded, retried, or rescheduled)
+	// so adaptive polling sees real activity for recurring and failing workloads,
+	// not just terminal one-shot deliveries.
+	return len(toDelete) + len(toDiscard) + len(toRetry) + len(toRecur)
+}
+
+// claimDue atomically claims due pending messages for processing and returns them.
+//
+// The inner SELECT ... FOR UPDATE SKIP LOCKED lets concurrent schedulers claim
+// disjoint batches without blocking each other; the surrounding UPDATE flips the
+// claimed rows to 'processing' and RETURNING streams them back in a single
+// statement, so no lock is held while the caller publishes.
+func (s *PostgresScheduler) claimDue(ctx context.Context) ([]*Message, error) {
+	// #nosec G201 -- table name is set at construction, not user input
+	query := fmt.Sprintf(`
+		UPDATE %s SET status = 'processing', claimed_at = $1
+		WHERE id IN (
+			SELECT id FROM %s
+			WHERE scheduled_at <= $2 AND (status = 'pending' OR status IS NULL)
+			ORDER BY scheduled_at ASC
+			LIMIT $3
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, event_name, payload, metadata, scheduled_at, created_at, retry_count,
+		          recurrence_type, recurrence_value, max_occurrences, until, occurrence_count
+	`, s.table, s.table)
+
+	now := time.Now()
+	rows, err := s.db.QueryContext(ctx, query, now, now, s.opts.batchSize)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	toDelete, toDiscard, toRetry, toRecur, err := s.collectBatch(ctx, rows)
-	if err != nil {
-		return 0
-	}
-
-	if err := s.applyBatchResults(ctx, tx, toDelete, toDiscard, toRetry, toRecur); err != nil {
-		return 0
-	}
-
-	if err := tx.Commit(); err != nil {
-		s.logger.Error("failed to commit transaction", "error", err)
-		return 0
-	}
-
-	return len(toDelete)
-}
-
-// queryDue locks and fetches due messages inside the given transaction.
-func (s *PostgresScheduler) queryDue(ctx context.Context, tx *sql.Tx) (*sql.Rows, error) {
-	// #nosec G201 -- table name is set at construction, not user input
-	query := fmt.Sprintf(`
-		SELECT id, event_name, payload, metadata, scheduled_at, created_at, retry_count,
-		       recurrence_type, recurrence_value, max_occurrences, until, occurrence_count
-		FROM %s
-		WHERE scheduled_at <= $1
-		ORDER BY scheduled_at ASC
-		LIMIT $2
-		FOR UPDATE SKIP LOCKED
-	`, s.table)
-	rows, err := tx.QueryContext(ctx, query, time.Now(), s.opts.batchSize)
-	if err != nil {
-		s.logger.Error("failed to query due messages", "error", err)
-		return nil, err
-	}
-	return rows, nil
-}
-
-// collectBatch iterates rows and classifies each message as delivered, discarded, to retry, or to recur.
-func (s *PostgresScheduler) collectBatch(ctx context.Context, rows *sql.Rows) (toDelete, toDiscard []string, toRetry []retryUpdate, toRecur []recurrenceUpdate, err error) {
+	var claimed []*Message
 	for rows.Next() {
-		processingStart := time.Now()
-
 		msg, scanErr := scanPostgresMessage(rows)
 		if scanErr != nil {
-			s.logger.Error("failed to scan message", "error", scanErr)
+			s.logger.Error("failed to scan claimed message", "error", scanErr)
 			continue
 		}
+		claimed = append(claimed, msg)
+	}
+	if rowErr := rows.Err(); rowErr != nil {
+		return nil, rowErr
+	}
+	return claimed, nil
+}
+
+// deliverBatch publishes each claimed message outside any lock and classifies
+// the outcome as delivered (toDelete), DLQ/discarded (toDiscard), to retry, or to recur.
+func (s *PostgresScheduler) deliverBatch(ctx context.Context, claimed []*Message) (toDelete, toDiscard []string, toRetry []retryUpdate, toRecur []recurrenceUpdate) {
+	for _, msg := range claimed {
+		processingStart := time.Now()
 
 		if publishErr := publishScheduledMessage(ctx, s.transport, msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
@@ -527,12 +559,7 @@ func (s *PostgresScheduler) collectBatch(ctx context.Context, rows *sql.Rows) (t
 			})
 		}
 	}
-
-	if rowErr := rows.Err(); rowErr != nil {
-		s.logger.Error("failed to iterate rows", "error", rowErr)
-		return nil, nil, nil, nil, rowErr
-	}
-	return toDelete, toDiscard, toRetry, toRecur, nil
+	return toDelete, toDiscard, toRetry, toRecur
 }
 
 // scanPostgresMessage scans one row into a Message, including JSON metadata and recurrence fields.
@@ -561,42 +588,77 @@ func scanPostgresMessage(rows *sql.Rows) (*Message, error) {
 	return &msg, nil
 }
 
-// applyBatchResults applies deletes, retry-updates, and recurrence-reschedules within the transaction.
-func (s *PostgresScheduler) applyBatchResults(ctx context.Context, tx *sql.Tx, toDelete, toDiscard []string, toRetry []retryUpdate, toRecur []recurrenceUpdate) error {
+// applyBatchResults applies deletes, retry-updates, and recurrence-reschedules
+// in a single short transaction, after publishing has completed outside any lock.
+// Retried and rescheduled rows are returned to 'pending' (claimed_at cleared) so
+// the next poll can pick them up.
+func (s *PostgresScheduler) applyBatchResults(ctx context.Context, toDelete, toDiscard []string, toRetry []retryUpdate, toRecur []recurrenceUpdate) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	if len(toDelete) > 0 {
 		// #nosec G201 -- table name is set at construction, not user input
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDelete); err != nil {
-			s.logger.Error("failed to delete delivered messages", "error", err)
-			return err
+			return fmt.Errorf("delete delivered messages: %w", err)
 		}
 	}
 	if len(toDiscard) > 0 {
 		// #nosec G201 -- table name is set at construction, not user input
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDiscard); err != nil {
-			s.logger.Error("failed to delete discarded messages", "error", err)
-			return err
+			return fmt.Errorf("delete discarded messages: %w", err)
 		}
 	}
 	for _, r := range toRetry {
 		// #nosec G201 -- table name is set at construction, not user input
 		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf("UPDATE %s SET retry_count = $1, scheduled_at = $2 WHERE id = $3", s.table),
+			fmt.Sprintf("UPDATE %s SET retry_count = $1, scheduled_at = $2, status = 'pending', claimed_at = NULL WHERE id = $3", s.table),
 			r.RetryCount, r.NextRetry, r.ID,
 		); err != nil {
-			s.logger.Error("failed to update message for retry", "id", r.ID, "error", err)
+			return fmt.Errorf("update message %s for retry: %w", r.ID, err)
 		}
 	}
 	for _, r := range toRecur {
 		// Reset retry_count so the next occurrence gets a fresh retry window.
 		// #nosec G201 -- table name is set at construction, not user input
 		if _, err := tx.ExecContext(ctx,
-			fmt.Sprintf("UPDATE %s SET scheduled_at = $1, occurrence_count = $2, retry_count = 0 WHERE id = $3", s.table),
+			fmt.Sprintf("UPDATE %s SET scheduled_at = $1, occurrence_count = $2, retry_count = 0, status = 'pending', claimed_at = NULL WHERE id = $3", s.table),
 			r.NextAt, r.OccurrenceCount, r.ID,
 		); err != nil {
-			s.logger.Error("failed to reschedule recurring message", "id", r.ID, "error", err)
+			return fmt.Errorf("reschedule recurring message %s: %w", r.ID, err)
 		}
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit batch results: %w", err)
+	}
 	return nil
+}
+
+// recoverStuck moves messages stuck in 'processing' back to 'pending'.
+// This handles scheduler crashes where a row was claimed but never finalized.
+func (s *PostgresScheduler) recoverStuck(ctx context.Context) {
+	cutoff := time.Now().Add(-s.opts.stuckDuration)
+	// #nosec G201 -- table name is set at construction, not user input
+	query := fmt.Sprintf(
+		"UPDATE %s SET status = 'pending', claimed_at = NULL WHERE status = 'processing' AND claimed_at < $1",
+		s.table)
+	result, err := s.db.ExecContext(ctx, query, cutoff)
+	if err != nil {
+		s.logger.Error("failed to recover stuck messages", "error", err)
+		return
+	}
+	recovered, _ := result.RowsAffected()
+	if recovered > 0 {
+		if s.opts.metrics != nil {
+			s.opts.metrics.RecordRecovered(ctx, recovered)
+		}
+		s.logger.Warn("recovered stuck scheduled messages",
+			"count", recovered,
+			"stuck_duration", s.opts.stuckDuration)
+	}
 }
 
 // EnsureTable creates the scheduled_messages table if it doesn't exist.
@@ -614,9 +676,11 @@ func (s *PostgresScheduler) EnsureTable(ctx context.Context) error {
 			recurrence_value TEXT,
 			max_occurrences  INTEGER NOT NULL DEFAULT 0,
 			until            TIMESTAMP,
-			occurrence_count INTEGER NOT NULL DEFAULT 0
+			occurrence_count INTEGER NOT NULL DEFAULT 0,
+			status           VARCHAR(20) NOT NULL DEFAULT 'pending',
+			claimed_at       TIMESTAMP
 		);
-		CREATE INDEX IF NOT EXISTS idx_%s_scheduled_due ON %s(scheduled_at);
+		CREATE INDEX IF NOT EXISTS idx_%s_scheduled_due ON %s(status, scheduled_at);
 	`, s.table, s.table, s.table)
 	_, err := s.db.ExecContext(ctx, query)
 	return err
@@ -648,19 +712,41 @@ func (s *PostgresScheduler) MigrateAddRecurrence(ctx context.Context) error {
 	return err
 }
 
-// countPending returns the number of pending scheduled messages.
+// MigrateAddProcessingState adds the status and claimed_at columns to an existing
+// table and switches the due index to (status, scheduled_at).
+// Safe to call multiple times; uses ADD COLUMN IF NOT EXISTS.
+// Call this when upgrading from a version that pre-dates 2-phase claim support.
+func (s *PostgresScheduler) MigrateAddProcessingState(ctx context.Context) error {
+	query := fmt.Sprintf( // #nosec G201 -- table name is set at construction, not user input
+		`ALTER TABLE %s
+			ADD COLUMN IF NOT EXISTS status     VARCHAR(20) NOT NULL DEFAULT 'pending',
+			ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMP;
+		CREATE INDEX IF NOT EXISTS idx_%s_status_due ON %s(status, scheduled_at);`,
+		s.table, s.table, s.table)
+	_, err := s.db.ExecContext(ctx, query)
+	return err
+}
+
+// countPending returns the number of pending scheduled messages
+// (rows not currently claimed for processing).
 func (s *PostgresScheduler) countPending(ctx context.Context) (int64, error) {
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table) // #nosec G201 -- table name is set at construction, not user input
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE status = 'pending' OR status IS NULL", s.table) // #nosec G201 -- table name is set at construction, not user input
 	var count int64
 	err := s.db.QueryRowContext(ctx, query).Scan(&count)
 	return count, err
 }
 
-// setupMetricsCallbacks configures the metrics gauge callbacks for pending messages.
+// countStuck returns the number of messages stuck in processing (older than stuckDuration).
+func (s *PostgresScheduler) countStuck(ctx context.Context) (int64, error) {
+	cutoff := time.Now().Add(-s.opts.stuckDuration)
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE status = 'processing' AND claimed_at < $1", s.table) // #nosec G201 -- table name is set at construction, not user input
+	var count int64
+	err := s.db.QueryRowContext(ctx, query, cutoff).Scan(&count)
+	return count, err
+}
+
+// setupMetricsCallbacks configures the metrics gauge callbacks for pending and stuck messages.
 // This should be called after creating the scheduler if metrics are enabled.
-//
-// Note: PostgreSQL scheduler doesn't have a separate processing state like Redis/MongoDB,
-// so the stuck messages gauge will always be 0.
 func (s *PostgresScheduler) setupMetricsCallbacks(ctx context.Context) {
 	if s.opts.metrics == nil {
 		return
@@ -675,10 +761,13 @@ func (s *PostgresScheduler) setupMetricsCallbacks(ctx context.Context) {
 		return count
 	})
 
-	// PostgreSQL uses FOR UPDATE SKIP LOCKED, so there's no separate "stuck" state
-	// Messages are either pending or being processed in a transaction
 	s.opts.metrics.SetStuckCallback(func() int64 {
-		return 0
+		count, err := s.countStuck(ctx)
+		if err != nil {
+			s.logger.Error("failed to count stuck messages for metrics", "error", err)
+			return 0
+		}
+		return count
 	})
 }
 
@@ -687,11 +776,10 @@ func (s *PostgresScheduler) setupMetricsCallbacks(ctx context.Context) {
 // The health check:
 //   - Pings PostgreSQL to verify connectivity
 //   - Counts pending messages
+//   - Counts stuck messages (claimed but not finalized beyond stuckDuration)
 //
-// Note: PostgreSQL scheduler uses FOR UPDATE SKIP LOCKED, so there's no
-// separate "stuck" state. Messages are atomically locked within transactions.
-//
-// Returns health.StatusHealthy if PostgreSQL is responsive.
+// Returns health.StatusHealthy if PostgreSQL is responsive and no stuck messages.
+// Returns health.StatusDegraded if stuck messages exist.
 // Returns health.StatusUnhealthy if PostgreSQL is not responsive.
 func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 	start := time.Now()
@@ -706,23 +794,37 @@ func (s *PostgresScheduler) Health(ctx context.Context) *health.Result {
 		}
 	}
 
+	status := health.StatusHealthy
+	var messages []string
+
 	// Count pending messages
 	pending, err := s.countPending(ctx)
-	message := ""
-	status := health.StatusHealthy
 	if err != nil {
 		status = health.StatusDegraded
-		message = fmt.Sprintf("failed to count pending: %v", err)
+		messages = append(messages, fmt.Sprintf("failed to count pending: %v", err))
+	}
+
+	// Count stuck messages
+	stuck, err := s.countStuck(ctx)
+	if err != nil {
+		status = health.StatusDegraded
+		messages = append(messages, fmt.Sprintf("failed to count stuck: %v", err))
+	}
+
+	// Degraded if stuck messages exist
+	if stuck > 0 && status == health.StatusHealthy {
+		status = health.StatusDegraded
+		messages = append(messages, fmt.Sprintf("%d messages stuck in processing", stuck))
 	}
 
 	return &health.Result{
 		Status:    status,
-		Message:   message,
+		Message:   strings.Join(messages, "; "),
 		Latency:   time.Since(start),
 		CheckedAt: start,
 		Details: map[string]any{
 			"pending_messages": pending,
-			"stuck_messages":   int64(0), // PostgreSQL uses FOR UPDATE SKIP LOCKED
+			"stuck_messages":   stuck,
 			"table":            s.table,
 		},
 	}

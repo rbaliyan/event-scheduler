@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/lib/pq"
 	scheduler "github.com/rbaliyan/event-scheduler"
 	"github.com/rbaliyan/event/v3/backoff"
 	"github.com/rbaliyan/event/v3/transport/channel"
-	_ "github.com/lib/pq"
 )
 
 // logDLQ is a dead letter queue that logs failed messages.

@@ -480,6 +480,72 @@ func TestMessageToProto(t *testing.T) {
 			t.Error("expected nil created_at for zero time")
 		}
 	})
+
+	t.Run("one-shot has no recurrence", func(t *testing.T) {
+		pb := messageToProto(&scheduler.Message{ID: "msg-1"})
+		if pb.Recurrence != nil {
+			t.Errorf("expected nil recurrence for one-shot message, got %v", pb.Recurrence)
+		}
+		if pb.OccurrenceCount != 0 {
+			t.Errorf("occurrence_count = %d, want 0", pb.OccurrenceCount)
+		}
+	})
+
+	t.Run("interval recurrence", func(t *testing.T) {
+		until := time.Now().Add(24 * time.Hour)
+		msg := &scheduler.Message{
+			ID: "msg-1",
+			Recurrence: &scheduler.Recurrence{
+				Type:           scheduler.RecurrenceInterval,
+				Interval:       2 * time.Hour,
+				MaxOccurrences: 5,
+				Until:          until,
+			},
+			OccurrenceCount: 2,
+		}
+		pb := messageToProto(msg)
+		if pb.Recurrence == nil {
+			t.Fatal("expected non-nil recurrence")
+		}
+		if pb.Recurrence.Type != schedulerpb.RecurrenceType_RECURRENCE_TYPE_INTERVAL {
+			t.Errorf("type = %v, want INTERVAL", pb.Recurrence.Type)
+		}
+		if pb.Recurrence.Value != "2h0m0s" {
+			t.Errorf("value = %q, want %q", pb.Recurrence.Value, "2h0m0s")
+		}
+		if pb.Recurrence.MaxOccurrences != 5 {
+			t.Errorf("max_occurrences = %d, want 5", pb.Recurrence.MaxOccurrences)
+		}
+		if pb.Recurrence.Until == nil {
+			t.Error("expected non-nil until")
+		}
+		if pb.OccurrenceCount != 2 {
+			t.Errorf("occurrence_count = %d, want 2", pb.OccurrenceCount)
+		}
+	})
+
+	t.Run("cron recurrence", func(t *testing.T) {
+		msg := &scheduler.Message{
+			ID: "msg-1",
+			Recurrence: &scheduler.Recurrence{
+				Type: scheduler.RecurrenceCron,
+				Cron: "0 9 * * 1-5",
+			},
+		}
+		pb := messageToProto(msg)
+		if pb.Recurrence == nil {
+			t.Fatal("expected non-nil recurrence")
+		}
+		if pb.Recurrence.Type != schedulerpb.RecurrenceType_RECURRENCE_TYPE_CRON {
+			t.Errorf("type = %v, want CRON", pb.Recurrence.Type)
+		}
+		if pb.Recurrence.Value != "0 9 * * 1-5" {
+			t.Errorf("value = %q, want cron expr", pb.Recurrence.Value)
+		}
+		if pb.Recurrence.Until != nil {
+			t.Error("expected nil until when not set")
+		}
+	})
 }
 
 func TestProtoToFilter(t *testing.T) {
