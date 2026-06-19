@@ -76,6 +76,56 @@ func (HealthStatus) EnumDescriptor() ([]byte, []int) {
 	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{0}
 }
 
+// RecurrenceType enumerates how a scheduled message repeats.
+type RecurrenceType int32
+
+const (
+	RecurrenceType_RECURRENCE_TYPE_UNSPECIFIED RecurrenceType = 0
+	RecurrenceType_RECURRENCE_TYPE_INTERVAL    RecurrenceType = 1
+	RecurrenceType_RECURRENCE_TYPE_CRON        RecurrenceType = 2
+)
+
+// Enum value maps for RecurrenceType.
+var (
+	RecurrenceType_name = map[int32]string{
+		0: "RECURRENCE_TYPE_UNSPECIFIED",
+		1: "RECURRENCE_TYPE_INTERVAL",
+		2: "RECURRENCE_TYPE_CRON",
+	}
+	RecurrenceType_value = map[string]int32{
+		"RECURRENCE_TYPE_UNSPECIFIED": 0,
+		"RECURRENCE_TYPE_INTERVAL":    1,
+		"RECURRENCE_TYPE_CRON":        2,
+	}
+)
+
+func (x RecurrenceType) Enum() *RecurrenceType {
+	p := new(RecurrenceType)
+	*p = x
+	return p
+}
+
+func (x RecurrenceType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RecurrenceType) Descriptor() protoreflect.EnumDescriptor {
+	return file_scheduler_v1_scheduler_proto_enumTypes[1].Descriptor()
+}
+
+func (RecurrenceType) Type() protoreflect.EnumType {
+	return &file_scheduler_v1_scheduler_proto_enumTypes[1]
+}
+
+func (x RecurrenceType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RecurrenceType.Descriptor instead.
+func (RecurrenceType) EnumDescriptor() ([]byte, []int) {
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{1}
+}
+
 // GetRequest is the request for Get.
 type GetRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -176,7 +226,9 @@ type ListRequest struct {
 	// Messages scheduled after this time (unset = no minimum).
 	After *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=after,proto3" json:"after,omitempty"`
 	// Maximum number of messages to return (0 = server default).
-	Limit         int32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit int32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Number of leading messages to skip, for pagination (0 = none).
+	Offset        int32 `protobuf:"varint,5,opt,name=offset,proto3" json:"offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -239,12 +291,18 @@ func (x *ListRequest) GetLimit() int32 {
 	return 0
 }
 
+func (x *ListRequest) GetOffset() int32 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
 // ListResponse is the response for List.
 type ListResponse struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Messages []*Message             `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
-	// Total number of messages returned. Consumers can compare this
-	// with the requested limit to determine if results were truncated.
+	// Number of messages contained in this response (== len(messages)).
 	TotalCount    int32 `protobuf:"varint,2,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -404,6 +462,79 @@ func (x *HealthResponse) GetDetails() map[string]string {
 	return nil
 }
 
+// Recurrence describes the periodic re-delivery configuration of a message.
+type Recurrence struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The recurrence pattern.
+	Type RecurrenceType `protobuf:"varint,1,opt,name=type,proto3,enum=scheduler.v1.RecurrenceType" json:"type,omitempty"`
+	// For INTERVAL, a Go duration string (e.g. "24h"); for CRON, the cron expression.
+	Value string `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	// Maximum number of deliveries (0 = unlimited).
+	MaxOccurrences int32 `protobuf:"varint,3,opt,name=max_occurrences,json=maxOccurrences,proto3" json:"max_occurrences,omitempty"`
+	// Stops recurrence after this time (unset = no end date).
+	Until         *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=until,proto3" json:"until,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Recurrence) Reset() {
+	*x = Recurrence{}
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Recurrence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Recurrence) ProtoMessage() {}
+
+func (x *Recurrence) ProtoReflect() protoreflect.Message {
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Recurrence.ProtoReflect.Descriptor instead.
+func (*Recurrence) Descriptor() ([]byte, []int) {
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *Recurrence) GetType() RecurrenceType {
+	if x != nil {
+		return x.Type
+	}
+	return RecurrenceType_RECURRENCE_TYPE_UNSPECIFIED
+}
+
+func (x *Recurrence) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *Recurrence) GetMaxOccurrences() int32 {
+	if x != nil {
+		return x.MaxOccurrences
+	}
+	return 0
+}
+
+func (x *Recurrence) GetUntil() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Until
+	}
+	return nil
+}
+
 // Message represents a scheduled message.
 type Message struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -420,14 +551,18 @@ type Message struct {
 	// When the message was scheduled.
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// Number of delivery attempts.
-	RetryCount    int32 `protobuf:"varint,7,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RetryCount int32 `protobuf:"varint,7,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"`
+	// Recurrence configuration (unset for one-shot messages).
+	Recurrence *Recurrence `protobuf:"bytes,8,opt,name=recurrence,proto3" json:"recurrence,omitempty"`
+	// Number of times this recurring message has already fired.
+	OccurrenceCount int32 `protobuf:"varint,9,opt,name=occurrence_count,json=occurrenceCount,proto3" json:"occurrence_count,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Message) Reset() {
 	*x = Message{}
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[6]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -439,7 +574,7 @@ func (x *Message) String() string {
 func (*Message) ProtoMessage() {}
 
 func (x *Message) ProtoReflect() protoreflect.Message {
-	mi := &file_scheduler_v1_scheduler_proto_msgTypes[6]
+	mi := &file_scheduler_v1_scheduler_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -452,7 +587,7 @@ func (x *Message) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Message.ProtoReflect.Descriptor instead.
 func (*Message) Descriptor() ([]byte, []int) {
-	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{6}
+	return file_scheduler_v1_scheduler_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Message) GetId() string {
@@ -504,6 +639,20 @@ func (x *Message) GetRetryCount() int32 {
 	return 0
 }
 
+func (x *Message) GetRecurrence() *Recurrence {
+	if x != nil {
+		return x.Recurrence
+	}
+	return nil
+}
+
+func (x *Message) GetOccurrenceCount() int32 {
+	if x != nil {
+		return x.OccurrenceCount
+	}
+	return 0
+}
+
 var File_scheduler_v1_scheduler_proto protoreflect.FileDescriptor
 
 const file_scheduler_v1_scheduler_proto_rawDesc = "" +
@@ -513,13 +662,14 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"GetRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\">\n" +
 	"\vGetResponse\x12/\n" +
-	"\amessage\x18\x01 \x01(\v2\x15.scheduler.v1.MessageR\amessage\"\xa8\x01\n" +
+	"\amessage\x18\x01 \x01(\v2\x15.scheduler.v1.MessageR\amessage\"\xc0\x01\n" +
 	"\vListRequest\x12\x1d\n" +
 	"\n" +
 	"event_name\x18\x01 \x01(\tR\teventName\x122\n" +
 	"\x06before\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x06before\x120\n" +
 	"\x05after\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x05after\x12\x14\n" +
-	"\x05limit\x18\x04 \x01(\x05R\x05limit\"b\n" +
+	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12\x16\n" +
+	"\x06offset\x18\x05 \x01(\x05R\x06offset\"b\n" +
 	"\fListResponse\x121\n" +
 	"\bmessages\x18\x01 \x03(\v2\x15.scheduler.v1.MessageR\bmessages\x12\x1f\n" +
 	"\vtotal_count\x18\x02 \x01(\x05R\n" +
@@ -533,7 +683,13 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\adetails\x18\x04 \x03(\v2).scheduler.v1.HealthResponse.DetailsEntryR\adetails\x1a:\n" +
 	"\fDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xeb\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xaf\x01\n" +
+	"\n" +
+	"Recurrence\x120\n" +
+	"\x04type\x18\x01 \x01(\x0e2\x1c.scheduler.v1.RecurrenceTypeR\x04type\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\x12'\n" +
+	"\x0fmax_occurrences\x18\x03 \x01(\x05R\x0emaxOccurrences\x120\n" +
+	"\x05until\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\x05until\"\xd0\x03\n" +
 	"\aMessage\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -544,7 +700,11 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x1f\n" +
 	"\vretry_count\x18\a \x01(\x05R\n" +
-	"retryCount\x1a;\n" +
+	"retryCount\x128\n" +
+	"\n" +
+	"recurrence\x18\b \x01(\v2\x18.scheduler.v1.RecurrenceR\n" +
+	"recurrence\x12)\n" +
+	"\x10occurrence_count\x18\t \x01(\x05R\x0foccurrenceCount\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*\x81\x01\n" +
@@ -552,7 +712,11 @@ const file_scheduler_v1_scheduler_proto_rawDesc = "" +
 	"\x19HEALTH_STATUS_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15HEALTH_STATUS_HEALTHY\x10\x01\x12\x1a\n" +
 	"\x16HEALTH_STATUS_DEGRADED\x10\x02\x12\x1b\n" +
-	"\x17HEALTH_STATUS_UNHEALTHY\x10\x032\x97\x02\n" +
+	"\x17HEALTH_STATUS_UNHEALTHY\x10\x03*i\n" +
+	"\x0eRecurrenceType\x12\x1f\n" +
+	"\x1bRECURRENCE_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18RECURRENCE_TYPE_INTERVAL\x10\x01\x12\x18\n" +
+	"\x14RECURRENCE_TYPE_CRON\x10\x022\x97\x02\n" +
 	"\x10SchedulerService\x12U\n" +
 	"\x03Get\x12\x18.scheduler.v1.GetRequest\x1a\x19.scheduler.v1.GetResponse\"\x19\x82\xd3\xe4\x93\x02\x13\x12\x11/v1/messages/{id}\x12S\n" +
 	"\x04List\x12\x19.scheduler.v1.ListRequest\x1a\x1a.scheduler.v1.ListResponse\"\x14\x82\xd3\xe4\x93\x02\x0e\x12\f/v1/messages\x12W\n" +
@@ -571,42 +735,47 @@ func file_scheduler_v1_scheduler_proto_rawDescGZIP() []byte {
 	return file_scheduler_v1_scheduler_proto_rawDescData
 }
 
-var file_scheduler_v1_scheduler_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_scheduler_v1_scheduler_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_scheduler_v1_scheduler_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_scheduler_v1_scheduler_proto_goTypes = []any{
 	(HealthStatus)(0),             // 0: scheduler.v1.HealthStatus
-	(*GetRequest)(nil),            // 1: scheduler.v1.GetRequest
-	(*GetResponse)(nil),           // 2: scheduler.v1.GetResponse
-	(*ListRequest)(nil),           // 3: scheduler.v1.ListRequest
-	(*ListResponse)(nil),          // 4: scheduler.v1.ListResponse
-	(*HealthRequest)(nil),         // 5: scheduler.v1.HealthRequest
-	(*HealthResponse)(nil),        // 6: scheduler.v1.HealthResponse
-	(*Message)(nil),               // 7: scheduler.v1.Message
-	nil,                           // 8: scheduler.v1.HealthResponse.DetailsEntry
-	nil,                           // 9: scheduler.v1.Message.MetadataEntry
-	(*timestamppb.Timestamp)(nil), // 10: google.protobuf.Timestamp
+	(RecurrenceType)(0),           // 1: scheduler.v1.RecurrenceType
+	(*GetRequest)(nil),            // 2: scheduler.v1.GetRequest
+	(*GetResponse)(nil),           // 3: scheduler.v1.GetResponse
+	(*ListRequest)(nil),           // 4: scheduler.v1.ListRequest
+	(*ListResponse)(nil),          // 5: scheduler.v1.ListResponse
+	(*HealthRequest)(nil),         // 6: scheduler.v1.HealthRequest
+	(*HealthResponse)(nil),        // 7: scheduler.v1.HealthResponse
+	(*Recurrence)(nil),            // 8: scheduler.v1.Recurrence
+	(*Message)(nil),               // 9: scheduler.v1.Message
+	nil,                           // 10: scheduler.v1.HealthResponse.DetailsEntry
+	nil,                           // 11: scheduler.v1.Message.MetadataEntry
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_scheduler_v1_scheduler_proto_depIdxs = []int32{
-	7,  // 0: scheduler.v1.GetResponse.message:type_name -> scheduler.v1.Message
-	10, // 1: scheduler.v1.ListRequest.before:type_name -> google.protobuf.Timestamp
-	10, // 2: scheduler.v1.ListRequest.after:type_name -> google.protobuf.Timestamp
-	7,  // 3: scheduler.v1.ListResponse.messages:type_name -> scheduler.v1.Message
+	9,  // 0: scheduler.v1.GetResponse.message:type_name -> scheduler.v1.Message
+	12, // 1: scheduler.v1.ListRequest.before:type_name -> google.protobuf.Timestamp
+	12, // 2: scheduler.v1.ListRequest.after:type_name -> google.protobuf.Timestamp
+	9,  // 3: scheduler.v1.ListResponse.messages:type_name -> scheduler.v1.Message
 	0,  // 4: scheduler.v1.HealthResponse.status:type_name -> scheduler.v1.HealthStatus
-	8,  // 5: scheduler.v1.HealthResponse.details:type_name -> scheduler.v1.HealthResponse.DetailsEntry
-	9,  // 6: scheduler.v1.Message.metadata:type_name -> scheduler.v1.Message.MetadataEntry
-	10, // 7: scheduler.v1.Message.scheduled_at:type_name -> google.protobuf.Timestamp
-	10, // 8: scheduler.v1.Message.created_at:type_name -> google.protobuf.Timestamp
-	1,  // 9: scheduler.v1.SchedulerService.Get:input_type -> scheduler.v1.GetRequest
-	3,  // 10: scheduler.v1.SchedulerService.List:input_type -> scheduler.v1.ListRequest
-	5,  // 11: scheduler.v1.SchedulerService.Health:input_type -> scheduler.v1.HealthRequest
-	2,  // 12: scheduler.v1.SchedulerService.Get:output_type -> scheduler.v1.GetResponse
-	4,  // 13: scheduler.v1.SchedulerService.List:output_type -> scheduler.v1.ListResponse
-	6,  // 14: scheduler.v1.SchedulerService.Health:output_type -> scheduler.v1.HealthResponse
-	12, // [12:15] is the sub-list for method output_type
-	9,  // [9:12] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	10, // 5: scheduler.v1.HealthResponse.details:type_name -> scheduler.v1.HealthResponse.DetailsEntry
+	1,  // 6: scheduler.v1.Recurrence.type:type_name -> scheduler.v1.RecurrenceType
+	12, // 7: scheduler.v1.Recurrence.until:type_name -> google.protobuf.Timestamp
+	11, // 8: scheduler.v1.Message.metadata:type_name -> scheduler.v1.Message.MetadataEntry
+	12, // 9: scheduler.v1.Message.scheduled_at:type_name -> google.protobuf.Timestamp
+	12, // 10: scheduler.v1.Message.created_at:type_name -> google.protobuf.Timestamp
+	8,  // 11: scheduler.v1.Message.recurrence:type_name -> scheduler.v1.Recurrence
+	2,  // 12: scheduler.v1.SchedulerService.Get:input_type -> scheduler.v1.GetRequest
+	4,  // 13: scheduler.v1.SchedulerService.List:input_type -> scheduler.v1.ListRequest
+	6,  // 14: scheduler.v1.SchedulerService.Health:input_type -> scheduler.v1.HealthRequest
+	3,  // 15: scheduler.v1.SchedulerService.Get:output_type -> scheduler.v1.GetResponse
+	5,  // 16: scheduler.v1.SchedulerService.List:output_type -> scheduler.v1.ListResponse
+	7,  // 17: scheduler.v1.SchedulerService.Health:output_type -> scheduler.v1.HealthResponse
+	15, // [15:18] is the sub-list for method output_type
+	12, // [12:15] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_scheduler_v1_scheduler_proto_init() }
@@ -619,8 +788,8 @@ func file_scheduler_v1_scheduler_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_scheduler_v1_scheduler_proto_rawDesc), len(file_scheduler_v1_scheduler_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   9,
+			NumEnums:      2,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

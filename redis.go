@@ -87,23 +87,23 @@ return {msgID, data}
 // Example:
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	scheduler := scheduler.NewRedisScheduler(rdb, transport,
+//	sched, _ := scheduler.NewRedisScheduler(rdb, transport,
 //	    scheduler.WithPollInterval(100*time.Millisecond),
 //	    scheduler.WithBatchSize(100),
 //	)
 //
 //	// Start the scheduler (blocks until stopped)
-//	go scheduler.Start(ctx)
+//	go sched.Start(ctx)
 //
 //	// Schedule messages
-//	scheduler.Schedule(ctx, scheduler.Message{
+//	sched.Schedule(ctx, scheduler.Message{
 //	    EventName:   "orders.reminder",
 //	    Payload:     payload,
 //	    ScheduledAt: time.Now().Add(time.Hour),
 //	})
 //
 //	// Stop gracefully
-//	scheduler.Stop(ctx)
+//	sched.Stop(ctx)
 type RedisScheduler struct {
 	client    redis.Cmdable
 	transport transport.Transport
@@ -126,7 +126,7 @@ type RedisScheduler struct {
 // Example:
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	scheduler, err := scheduler.NewRedisScheduler(rdb, transport)
+//	sched, err := scheduler.NewRedisScheduler(rdb, transport)
 func NewRedisScheduler(client redis.Cmdable, t transport.Transport, opts ...Option) (*RedisScheduler, error) {
 	if err := eventerrors.RequireNotNil(client, "client"); err != nil {
 		return nil, err
@@ -408,6 +408,9 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 			s.logger.Error("failed to claim due message", "error", err)
 			break
 		}
+		// Every claimed message counts as activity for adaptive polling, whether
+		// it is delivered, retried, or discarded — consistent across all backends.
+		processed++
 
 		if err := publishScheduledMessage(ctx, s.transport, msg); err != nil {
 			s.logger.Error("failed to publish scheduled message",
@@ -433,9 +436,8 @@ func (s *RedisScheduler) processDue(ctx context.Context) int {
 				s.logger.Warn("failed to clean up processed message", "id", msg.ID, "error", err)
 			}
 		} else {
-			s.rescheduleRecurring(ctx, msg, member, outcome)
+			s.rescheduleRecurring(ctx, msg, outcome)
 		}
-		processed++
 	}
 	return processed
 }
@@ -476,7 +478,7 @@ func (s *RedisScheduler) handlePublishError(ctx context.Context, msg *Message, m
 
 // rescheduleRecurring atomically moves a successfully delivered recurring message
 // back to pending with the next scheduled time and updated occurrence count.
-func (s *RedisScheduler) rescheduleRecurring(ctx context.Context, msg *Message, member string, outcome recurrenceOutcome) {
+func (s *RedisScheduler) rescheduleRecurring(ctx context.Context, msg *Message, outcome recurrenceOutcome) {
 	msg.OccurrenceCount = outcome.newCount
 	msg.ScheduledAt = outcome.nextAt
 	msg.RetryCount = 0
@@ -509,7 +511,7 @@ func (s *RedisScheduler) claimDueMessage(ctx context.Context, now int64) (*Messa
 		return nil, "", redis.Nil
 	}
 
-	arr, ok := result.([]interface{})
+	arr, ok := result.([]any)
 	if !ok || len(arr) < 2 {
 		return nil, "", fmt.Errorf("unexpected claim result type: %T", result)
 	}
@@ -549,6 +551,9 @@ func (s *RedisScheduler) claimDueMessage(ctx context.Context, now int64) (*Messa
 func (s *RedisScheduler) recoverStuck(ctx context.Context) {
 	cutoff := time.Now().Add(-s.opts.stuckDuration).Unix()
 
+	// Recovery is intentionally rate-limited to 100 messages per cycle: a large
+	// stuck backlog drains over several recovery ticks rather than in one burst,
+	// bounding the work done per cycle. The stuck gauge reflects the full backlog.
 	ids, err := s.client.ZRangeByScore(ctx, s.processingKey(), &redis.ZRangeBy{
 		Min:   "-inf",
 		Max:   fmt.Sprintf("%d", cutoff),

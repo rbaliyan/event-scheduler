@@ -17,26 +17,34 @@ import (
 //   - scheduled_messages_total: Counter of total messages scheduled
 //   - scheduled_messages_delivered_total: Counter of messages successfully delivered
 //   - scheduled_messages_failed_total: Counter of messages that failed delivery
+//   - scheduled_messages_cancelled_total: Counter of messages cancelled
+//   - scheduled_messages_recovered_total: Counter of stuck messages recovered
+//   - scheduled_messages_dlq_total: Counter of messages sent to the dead-letter queue
+//   - scheduled_messages_rescheduled_total: Counter of recurring messages rescheduled
 //   - scheduled_messages_pending: Gauge of current pending scheduled messages
 //   - scheduled_messages_stuck: Gauge of current stuck messages being recovered
 //   - schedule_delivery_delay_seconds: Histogram of delay between scheduled and actual delivery
 //   - schedule_processing_duration_seconds: Histogram of time to process and deliver a message
 //
+// Metrics are wired via the WithMetrics option; gauge callbacks are registered
+// automatically when Start() is called.
+//
 // Example:
 //
-//	metrics := scheduler.NewMetrics()
-//	scheduler := scheduler.NewRedisScheduler(client, transport).WithMetrics(metrics)
+//	metrics, _ := scheduler.NewMetrics()
+//	sched, err := scheduler.NewRedisScheduler(client, transport,
+//	    scheduler.WithMetrics(metrics))
 type Metrics struct {
 	meter metric.Meter
 
 	// Counters
-	scheduledTotal    metric.Int64Counter
-	deliveredTotal    metric.Int64Counter
-	failedTotal       metric.Int64Counter
-	cancelledTotal    metric.Int64Counter
-	recoveredTotal    metric.Int64Counter
-	dlqSentTotal      metric.Int64Counter
-	rescheduledTotal  metric.Int64Counter
+	scheduledTotal   metric.Int64Counter
+	deliveredTotal   metric.Int64Counter
+	failedTotal      metric.Int64Counter
+	cancelledTotal   metric.Int64Counter
+	recoveredTotal   metric.Int64Counter
+	dlqSentTotal     metric.Int64Counter
+	rescheduledTotal metric.Int64Counter
 
 	// Gauges (using UpDownCounter for gauge-like behavior)
 	pendingMessages metric.Int64ObservableGauge
@@ -78,7 +86,7 @@ func WithMeterProvider(provider metric.MeterProvider) MetricsOption {
 //
 // Example:
 //
-//	metrics := scheduler.NewMetrics(scheduler.WithNamespace("orders"))
+//	metrics, _ := scheduler.NewMetrics(scheduler.WithNamespace("orders"))
 //	// Metrics will be: orders_scheduled_messages_total, etc.
 func WithNamespace(namespace string) MetricsOption {
 	return func(o *metricsOptions) {
@@ -96,13 +104,13 @@ func WithNamespace(namespace string) MetricsOption {
 // Example:
 //
 //	// Using global provider
-//	metrics := scheduler.NewMetrics()
+//	metrics, _ := scheduler.NewMetrics()
 //
 //	// Using custom provider
-//	metrics := scheduler.NewMetrics(scheduler.WithMeterProvider(myProvider))
+//	metrics, _ := scheduler.NewMetrics(scheduler.WithMeterProvider(myProvider))
 //
 //	// With namespace
-//	metrics := scheduler.NewMetrics(scheduler.WithNamespace("orders"))
+//	metrics, _ := scheduler.NewMetrics(scheduler.WithNamespace("orders"))
 func NewMetrics(opts ...MetricsOption) (*Metrics, error) {
 	o := &metricsOptions{
 		meterProvider: otel.GetMeterProvider(),

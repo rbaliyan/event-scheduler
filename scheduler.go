@@ -17,11 +17,14 @@
 //
 // # Basic Usage
 //
-//	scheduler := scheduler.NewRedisScheduler(redisClient, transport)
-//	go scheduler.Start(ctx)
+//	sched, err := scheduler.NewRedisScheduler(redisClient, transport)
+//	if err != nil {
+//	    return err
+//	}
+//	go sched.Start(ctx)
 //
 //	// Schedule a message for 1 hour from now
-//	err := scheduler.Schedule(ctx, scheduler.Message{
+//	err = sched.Schedule(ctx, scheduler.Message{
 //	    ID:          uuid.New().String(),
 //	    EventName:   "orders.reminder",
 //	    Payload:     payload,
@@ -31,7 +34,7 @@
 // # Cancellation
 //
 //	// Cancel a scheduled message
-//	err := scheduler.Cancel(ctx, messageID)
+//	err = sched.Cancel(ctx, messageID)
 //
 // # Architecture
 //
@@ -41,7 +44,8 @@
 //  3. Remove delivered messages from storage
 //
 // For Redis, this uses sorted sets with scheduled time as the score.
-// For SQL databases, this uses indexed queries on the scheduled_at column.
+// For PostgreSQL, this uses indexed (status, scheduled_at) queries with
+// FOR UPDATE SKIP LOCKED so multiple instances claim disjoint batches.
 //
 // # Best Practices
 //
@@ -346,7 +350,7 @@ func (f DLQFunc) Store(ctx context.Context, params DLQStoreParams) error {
 //
 // Use the With* functions to configure options:
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithPollInterval(100*time.Millisecond),
 //	    WithBatchSize(50),
 //	)
@@ -398,10 +402,11 @@ type options struct {
 	// When nil, failed messages are retried immediately on the next poll.
 	backoff BackoffStrategy
 
-	// maxRetries is the maximum number of delivery attempts before giving up.
+	// maxRetries is the maximum number of retries after the initial attempt.
+	// A value of n allows up to n+1 total delivery attempts (1 initial + n retries).
 	// If 0 (default), messages are retried indefinitely.
-	// After MaxRetries attempts, the message is removed from the scheduler
-	// and the failure is logged.
+	// After the retries are exhausted, the message is removed from the scheduler
+	// (sent to the DLQ first if configured) and the failure is logged.
 	maxRetries int
 
 	// dlq is the optional dead-letter queue for messages that exceed maxRetries.
@@ -422,8 +427,10 @@ type options struct {
 	// listener is an optional pq.Listener for PG LISTEN/NOTIFY wake-ups.
 	// When set, the scheduler wakes up immediately on NOTIFY instead of
 	// relying solely on the polling ticker.
-	listener        *pq.Listener
-	notifyChannel   string
+	listener *pq.Listener
+
+	// notifyChannel is the PG LISTEN/NOTIFY channel paired with listener.
+	notifyChannel string
 }
 
 // defaultOptions returns default scheduler options.
@@ -465,7 +472,7 @@ type Option func(*options)
 // Example:
 //
 //	// Check every 50ms for low-latency delivery
-//	scheduler := NewRedisScheduler(client, transport, WithPollInterval(50*time.Millisecond))
+//	sched, _ := NewRedisScheduler(client, transport, WithPollInterval(50*time.Millisecond))
 func WithPollInterval(d time.Duration) Option {
 	return func(o *options) {
 		if d > 0 {
@@ -486,7 +493,7 @@ func WithPollInterval(d time.Duration) Option {
 // Example:
 //
 //	// Enable adaptive polling with custom min/max bounds
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithAdaptivePolling(true),
 //	    WithMinPollInterval(10*time.Millisecond),
 //	    WithMaxPollInterval(2*time.Second),
@@ -506,7 +513,7 @@ func WithAdaptivePolling(enabled bool) Option {
 //
 // Example:
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithAdaptivePolling(true),
 //	    WithMinPollInterval(5*time.Millisecond),
 //	)
@@ -527,7 +534,7 @@ func WithMinPollInterval(d time.Duration) Option {
 //
 // Example:
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithAdaptivePolling(true),
 //	    WithMaxPollInterval(10*time.Second),
 //	)
@@ -547,7 +554,7 @@ func WithMaxPollInterval(d time.Duration) Option {
 // Example:
 //
 //	// Process up to 500 messages per poll
-//	scheduler := NewRedisScheduler(client, transport, WithBatchSize(500))
+//	sched, _ := NewRedisScheduler(client, transport, WithBatchSize(500))
 func WithBatchSize(size int) Option {
 	return func(o *options) {
 		if size > 0 {
@@ -562,7 +569,7 @@ func WithBatchSize(size int) Option {
 //
 // Example:
 //
-//	scheduler := NewRedisScheduler(client, transport, WithKeyPrefix("myapp:scheduler:"))
+//	sched, _ := NewRedisScheduler(client, transport, WithKeyPrefix("myapp:scheduler:"))
 func WithKeyPrefix(prefix string) Option {
 	return func(o *options) {
 		if prefix != "" {
@@ -577,7 +584,7 @@ func WithKeyPrefix(prefix string) Option {
 //
 // Example:
 //
-//	scheduler := NewPostgresScheduler(db, transport, WithTable("my_scheduled_jobs"))
+//	sched, _ := NewPostgresScheduler(db, transport, WithTable("my_scheduled_jobs"))
 func WithTable(table string) Option {
 	return func(o *options) {
 		if table != "" {
@@ -592,7 +599,7 @@ func WithTable(table string) Option {
 //
 // Example:
 //
-//	scheduler := NewMongoScheduler(db, transport, WithCollection("my_scheduled_jobs"))
+//	sched, _ := NewMongoScheduler(db, transport, WithCollection("my_scheduled_jobs"))
 func WithCollection(collection string) Option {
 	return func(o *options) {
 		if collection != "" {
@@ -608,7 +615,7 @@ func WithCollection(collection string) Option {
 //
 // Example:
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithLogger(slog.Default().With("service", "my-app")),
 //	)
 func WithLogger(l *slog.Logger) Option {
@@ -625,6 +632,10 @@ func WithLogger(l *slog.Logger) Option {
 //   - scheduled_messages_total: Counter of total messages scheduled
 //   - scheduled_messages_delivered_total: Counter of messages successfully delivered
 //   - scheduled_messages_failed_total: Counter of messages that failed delivery
+//   - scheduled_messages_cancelled_total: Counter of messages cancelled
+//   - scheduled_messages_recovered_total: Counter of stuck messages recovered
+//   - scheduled_messages_dlq_total: Counter of messages sent to the dead-letter queue
+//   - scheduled_messages_rescheduled_total: Counter of recurring messages rescheduled
 //   - scheduled_messages_pending: Gauge of current pending scheduled messages
 //   - scheduled_messages_stuck: Gauge of current stuck messages being recovered
 //   - schedule_delivery_delay_seconds: Histogram of delay between scheduled and actual delivery
@@ -633,7 +644,7 @@ func WithLogger(l *slog.Logger) Option {
 // Example:
 //
 //	metrics, _ := scheduler.NewMetrics()
-//	scheduler := scheduler.NewRedisScheduler(client, transport,
+//	sched, _ := scheduler.NewRedisScheduler(client, transport,
 //	    scheduler.WithMetrics(metrics),
 //	)
 func WithMetrics(m *Metrics) Option {
@@ -658,7 +669,7 @@ func WithMetrics(m *Metrics) Option {
 //	// Using the event library's backoff package
 //	import "github.com/rbaliyan/event/v3/backoff"
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithBackoff(&backoff.Exponential{
 //	        Initial:    time.Second,
 //	        Multiplier: 2.0,
@@ -672,43 +683,54 @@ func WithBackoff(strategy BackoffStrategy) Option {
 	}
 }
 
-// WithMaxRetries sets the maximum number of delivery attempts.
+// WithMaxRetries sets the maximum number of retries after the initial delivery
+// attempt. A value of n therefore allows up to n+1 total delivery attempts: the
+// first attempt plus n retries.
 //
-// After this many failed attempts, the message is removed from the scheduler
-// and the failure is logged. Use this to prevent messages from being retried
-// indefinitely.
+// Once a message has been retried n times and still fails, it is removed from
+// the scheduler (sent to the DLQ first if one is configured via WithDLQ) and the
+// failure is logged. Use this to prevent messages from being retried indefinitely.
 //
 // If set to 0 (default), messages are retried indefinitely until successful.
 //
 // Example:
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	// up to 6 total attempts: 1 initial + 5 retries
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithBackoff(backoffStrategy),
 //	    WithMaxRetries(5),
 //	)
-func WithMaxRetries(max int) Option {
+func WithMaxRetries(n int) Option {
 	return func(o *options) {
-		if max >= 0 {
-			o.maxRetries = max
+		if n >= 0 {
+			o.maxRetries = n
 		}
 	}
 }
 
 // WithDLQ sets the dead-letter queue for messages that exceed max retries.
 //
-// When a message fails delivery and has exceeded the configured MaxRetries,
-// it will be sent to the DLQ before being removed from the scheduler.
-// This prevents permanent message loss.
+// When a message fails delivery and has exhausted its retries (see
+// WithMaxRetries), it is sent to the DLQ before being removed from the
+// scheduler. This prevents permanent message loss.
 //
-// The dlq.Manager from github.com/rbaliyan/event-dlq satisfies the
-// DeadLetterQueue interface and can be used directly.
+// The dlq.Manager from github.com/rbaliyan/event-dlq does not satisfy
+// DeadLetterQueue directly — its Store method takes a dlq.StoreParams, not a
+// scheduler.DLQStoreParams. Adapt it with DLQFunc:
 //
-// Example:
-//
-//	dlqManager := dlq.NewManager(dlqStore, transport)
-//	scheduler := NewRedisScheduler(client, transport,
+//	mgr, err := dlq.NewManager(dlqStore, republisher) // returns (*Manager, error)
+//	if err != nil {
+//	    return err
+//	}
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithMaxRetries(5),
-//	    WithDLQ(dlqManager),
+//	    WithDLQ(DLQFunc(func(ctx context.Context, p DLQStoreParams) error {
+//	        return mgr.Store(ctx, dlq.StoreParams{
+//	            EventName: p.EventName, OriginalID: p.OriginalID,
+//	            Payload: p.Payload, Metadata: p.Metadata,
+//	            Err: p.Err, RetryCount: p.RetryCount, Source: p.Source,
+//	        })
+//	    })),
 //	)
 func WithDLQ(d DeadLetterQueue) Option {
 	return func(o *options) {
@@ -723,7 +745,7 @@ func WithDLQ(d DeadLetterQueue) Option {
 //
 // Example:
 //
-//	scheduler := NewRedisScheduler(client, transport,
+//	sched, _ := NewRedisScheduler(client, transport,
 //	    WithStuckDuration(10*time.Minute),
 //	)
 func WithStuckDuration(d time.Duration) Option {
@@ -742,14 +764,14 @@ func WithStuckDuration(d time.Duration) Option {
 // safety net for notifications missed during a scheduler restart.
 //
 // Pair this with a custom NOTIFY trigger on the scheduled_messages table, or
-// call pg_notify(channel, '') in the same transaction as the Schedule() call.
+// call pg_notify(channel, ”) in the same transaction as the Schedule() call.
 // PostgresScheduler.Schedule() emits pg_notify automatically when a listener
 // is configured — no manual trigger is required.
 //
 // Example:
 //
 //	listener := pq.NewListener(dsn, 10*time.Second, time.Minute, nil)
-//	scheduler, _ := NewPostgresScheduler(db, transport,
+//	sched, _ := NewPostgresScheduler(db, transport,
 //	    WithPollInterval(5*time.Second),          // fallback interval
 //	    WithNotifyListener(listener, "scheduler_due"),
 //	)
@@ -783,16 +805,10 @@ func newAdaptivePollState(initial, min, max time.Duration) *adaptivePollState {
 func (s *adaptivePollState) adjust(messagesProcessed int) time.Duration {
 	if messagesProcessed > 0 {
 		// Messages found - decrease interval (more activity expected)
-		s.current = s.current * 3 / 4 // Reduce by 25%
-		if s.current < s.min {
-			s.current = s.min
-		}
+		s.current = max(s.current*3/4, s.min) // Reduce by 25%, floor at min
 	} else {
 		// No messages - increase interval (less activity expected)
-		s.current = s.current * 3 / 2 // Increase by 50%
-		if s.current > s.max {
-			s.current = s.max
-		}
+		s.current = min(s.current*3/2, s.max) // Increase by 50%, cap at max
 	}
 	return s.current
 }

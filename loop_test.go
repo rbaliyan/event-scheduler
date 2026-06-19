@@ -1,0 +1,139 @@
+package scheduler
+
+import (
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// --- adaptivePollState.adjust math ---
+
+func TestAdaptivePollState_DecreasesWhenBusy(t *testing.T) {
+	s := newAdaptivePollState(100*time.Millisecond, 10*time.Millisecond, 5*time.Second)
+	got := s.adjust(5) // messages processed -> decrease by 25%
+	if got != 75*time.Millisecond {
+		t.Errorf("expected 75ms after busy adjust, got %v", got)
+	}
+}
+
+func TestAdaptivePollState_IncreasesWhenIdle(t *testing.T) {
+	s := newAdaptivePollState(100*time.Millisecond, 10*time.Millisecond, 5*time.Second)
+	got := s.adjust(0) // no messages -> increase by 50%
+	if got != 150*time.Millisecond {
+		t.Errorf("expected 150ms after idle adjust, got %v", got)
+	}
+}
+
+func TestAdaptivePollState_ClampsToMin(t *testing.T) {
+	s := newAdaptivePollState(12*time.Millisecond, 10*time.Millisecond, 5*time.Second)
+	// 12ms * 3/4 = 9ms, below the 10ms floor.
+	if got := s.adjust(1); got != 10*time.Millisecond {
+		t.Errorf("expected clamp to min 10ms, got %v", got)
+	}
+}
+
+func TestAdaptivePollState_ClampsToMax(t *testing.T) {
+	s := newAdaptivePollState(4*time.Second, 10*time.Millisecond, 5*time.Second)
+	// 4s * 3/2 = 6s, above the 5s ceiling.
+	if got := s.adjust(0); got != 5*time.Second {
+		t.Errorf("expected clamp to max 5s, got %v", got)
+	}
+}
+
+// --- runSchedulerLoop orchestration ---
+
+// startLoop runs runSchedulerLoop in a goroutine with the given hooks and
+// returns the stop channel plus a func that blocks until the loop exits.
+func startLoop(opts *options, processFn func() int, recoverFn func(), notifyCh <-chan struct{}) (stop chan struct{}, wait func()) {
+	stop = make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		runSchedulerLoop(
+			discardLogger(),
+			opts,
+			make(chan struct{}), // doneCh: never fires in these tests
+			stop,
+			processFn,
+			recoverFn,
+			notifyCh,
+			func() { close(done) },
+		)
+	}()
+	return stop, func() { <-done }
+}
+
+func TestRunSchedulerLoop_ProcessesOnTick(t *testing.T) {
+	opts := defaultOptions()
+	opts.pollInterval = 5 * time.Millisecond
+
+	var calls atomic.Int64
+	stop, wait := startLoop(opts, func() int { calls.Add(1); return 0 }, nil, nil)
+
+	time.Sleep(60 * time.Millisecond)
+	close(stop)
+	wait()
+
+	if got := calls.Load(); got < 3 {
+		t.Errorf("expected processFn to fire several times on the ticker, got %d", got)
+	}
+}
+
+func TestRunSchedulerLoop_StopInvokesOnExit(t *testing.T) {
+	opts := defaultOptions()
+	opts.pollInterval = time.Hour // ensure the ticker never fires during the test
+
+	stop, wait := startLoop(opts, func() int { return 0 }, nil, nil)
+	close(stop)
+
+	// wait() returning proves onExit ran and the loop exited promptly.
+	doneCh := make(chan struct{})
+	go func() { wait(); close(doneCh) }()
+	select {
+	case <-doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("loop did not exit and call onExit after Stop")
+	}
+}
+
+func TestRunSchedulerLoop_RecoversAtStartup(t *testing.T) {
+	opts := defaultOptions()
+	opts.pollInterval = time.Hour
+
+	var recovered atomic.Int64
+	stop, wait := startLoop(opts, func() int { return 0 }, func() { recovered.Add(1) }, nil)
+
+	// recoverFn is called once synchronously at startup before the select loop.
+	time.Sleep(30 * time.Millisecond)
+	close(stop)
+	wait()
+
+	if got := recovered.Load(); got < 1 {
+		t.Errorf("expected recoverFn to run at startup, got %d calls", got)
+	}
+}
+
+func TestRunSchedulerLoop_NotifyTriggersProcess(t *testing.T) {
+	opts := defaultOptions()
+	opts.pollInterval = time.Hour // isolate: only the notify can drive processing
+
+	processed := make(chan struct{}, 4)
+	notify := make(chan struct{}, 1)
+
+	stop, wait := startLoop(opts, func() int {
+		select {
+		case processed <- struct{}{}:
+		default:
+		}
+		return 1
+	}, nil, notify)
+
+	notify <- struct{}{}
+	select {
+	case <-processed:
+	case <-time.After(time.Second):
+		t.Fatal("notify did not trigger a process cycle")
+	}
+
+	close(stop)
+	wait()
+}

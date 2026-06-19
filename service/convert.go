@@ -17,6 +17,12 @@ var healthStatusToProto = map[health.Status]schedulerpb.HealthStatus{
 	health.StatusUnhealthy: schedulerpb.HealthStatus_HEALTH_STATUS_UNHEALTHY,
 }
 
+// recurrenceTypeToProto maps a scheduler.RecurrenceType to the proto enum.
+var recurrenceTypeToProto = map[scheduler.RecurrenceType]schedulerpb.RecurrenceType{
+	scheduler.RecurrenceInterval: schedulerpb.RecurrenceType_RECURRENCE_TYPE_INTERVAL,
+	scheduler.RecurrenceCron:     schedulerpb.RecurrenceType_RECURRENCE_TYPE_CRON,
+}
+
 // messageToProto converts a scheduler.Message to a proto Message.
 func messageToProto(m *scheduler.Message) *schedulerpb.Message {
 	if m == nil {
@@ -24,11 +30,13 @@ func messageToProto(m *scheduler.Message) *schedulerpb.Message {
 	}
 
 	pb := &schedulerpb.Message{
-		Id:         m.ID,
-		EventName:  m.EventName,
-		Payload:    m.Payload,
-		Metadata:   m.Metadata,
-		RetryCount: int32(m.RetryCount), // #nosec G115 -- value is bounded
+		Id:              m.ID,
+		EventName:       m.EventName,
+		Payload:         m.Payload,
+		Metadata:        m.Metadata,
+		RetryCount:      int32(m.RetryCount),      // #nosec G115 -- value is bounded
+		OccurrenceCount: int32(m.OccurrenceCount), // #nosec G115 -- value is bounded
+		Recurrence:      recurrenceToProto(m.Recurrence),
 	}
 
 	if !m.ScheduledAt.IsZero() {
@@ -41,11 +49,34 @@ func messageToProto(m *scheduler.Message) *schedulerpb.Message {
 	return pb
 }
 
+// recurrenceToProto converts a *scheduler.Recurrence to a proto Recurrence.
+// Returns nil for one-shot messages.
+func recurrenceToProto(r *scheduler.Recurrence) *schedulerpb.Recurrence {
+	if r == nil {
+		return nil
+	}
+	pb := &schedulerpb.Recurrence{
+		Type:           recurrenceTypeToProto[r.Type],
+		MaxOccurrences: int32(r.MaxOccurrences), // #nosec G115 -- value is bounded
+	}
+	switch r.Type {
+	case scheduler.RecurrenceInterval:
+		pb.Value = r.Interval.String()
+	case scheduler.RecurrenceCron:
+		pb.Value = r.Cron
+	}
+	if !r.Until.IsZero() {
+		pb.Until = timestamppb.New(r.Until)
+	}
+	return pb
+}
+
 // protoToFilter converts a proto ListRequest to a scheduler.Filter.
 func protoToFilter(req *schedulerpb.ListRequest) scheduler.Filter {
 	f := scheduler.Filter{
 		EventName: req.GetEventName(),
 		Limit:     int(req.GetLimit()),
+		Offset:    int(req.GetOffset()),
 	}
 
 	if req.GetBefore() != nil {

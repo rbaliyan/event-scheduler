@@ -265,8 +265,9 @@ scheduler.WithBackoff(&backoff.Exponential{
 // Set maximum retry attempts (default: 0 = infinite)
 scheduler.WithMaxRetries(5)
 
-// Set dead-letter queue for failed messages
-scheduler.WithDLQ(dlqManager)
+// Set dead-letter queue for failed messages (see Retry & DLQ section for the
+// DLQFunc adapter needed to wire an event-dlq Manager)
+scheduler.WithDLQ(dlqAdapter)
 
 // Enable OpenTelemetry metrics
 metrics, _ := scheduler.NewMetrics()
@@ -401,8 +402,12 @@ http.Handle("/v1/", handler)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/v1/messages/{id}` | Get a scheduled message by ID |
-| GET | `/v1/messages?event_name=...&limit=...&before=...&after=...` | List messages with optional filters |
+| GET | `/v1/messages?event_name=...&limit=...&offset=...&before=...&after=...` | List messages with optional filters and pagination |
 | GET | `/v1/health` | Scheduler health status |
+
+Returned messages include recurrence details (`recurrence`, `occurrence_count`)
+for recurring schedules. `total_count` reports the number of messages in the
+response (`== len(messages)`), not a grand total across all pages.
 
 ### gRPC Service
 
@@ -444,27 +449,59 @@ All three backends support identical retry behavior:
 2. If `BackoffStrategy` is set, `ScheduledAt` is updated to `now + backoff delay`
 3. If `MaxRetries > 0` and retries are exhausted, the message is sent to the DLQ (if configured) and discarded
 
+`WithMaxRetries(n)` allows up to `n` retries after the initial attempt (so `n+1`
+total delivery attempts). After the retries are exhausted, the message is sent to
+the DLQ (if configured) and removed.
+
 ```go
 import "github.com/rbaliyan/event/v3/backoff"
 
 // t is your transport.Transport (e.g. channel.New(), redis transport, etc.)
-sched := scheduler.NewRedisScheduler(rdb, t,
+sched, err := scheduler.NewRedisScheduler(rdb, t,
     scheduler.WithBackoff(&backoff.Exponential{
         Initial:    time.Second,
         Multiplier: 2.0,
         Max:        5 * time.Minute,
     }),
     scheduler.WithMaxRetries(5),
-    scheduler.WithDLQ(dlqManager),
+    scheduler.WithDLQ(dlq),
 )
 ```
 
-The `DeadLetterQueue` interface is satisfied by `dlq.Manager` from `github.com/rbaliyan/event-dlq`:
+The `DeadLetterQueue` interface is small:
 
 ```go
 type DeadLetterQueue interface {
     Store(ctx context.Context, params DLQStoreParams) error
 }
+```
+
+A `dlq.Manager` from `github.com/rbaliyan/event-dlq` does **not** satisfy this
+interface directly — its `Store` takes a `dlq.StoreParams`, not a
+`scheduler.DLQStoreParams`. Adapt it with the `DLQFunc` helper:
+
+```go
+mgr, err := dlq.NewManager(dlqStore, republisher) // returns (*dlq.Manager, error)
+if err != nil {
+    return err
+}
+
+dlqAdapter := scheduler.DLQFunc(func(ctx context.Context, p scheduler.DLQStoreParams) error {
+    return mgr.Store(ctx, dlq.StoreParams{
+        EventName:  p.EventName,
+        OriginalID: p.OriginalID,
+        Payload:    p.Payload,
+        Metadata:   p.Metadata,
+        Err:        p.Err,
+        RetryCount: p.RetryCount,
+        Source:     p.Source,
+    })
+})
+
+sched, err := scheduler.NewRedisScheduler(rdb, t,
+    scheduler.WithMaxRetries(5),
+    scheduler.WithDLQ(dlqAdapter),
+)
 ```
 
 ## OpenTelemetry Metrics
@@ -475,10 +512,10 @@ metrics, err := scheduler.NewMetrics(
     scheduler.WithMeterProvider(provider),
 )
 // t is your transport.Transport (e.g. channel.New(), redis transport, etc.)
-sched := scheduler.NewRedisScheduler(rdb, t,
+sched, err := scheduler.NewRedisScheduler(rdb, t,
     scheduler.WithMetrics(metrics),
 )
-sched.SetupMetricsCallbacks(ctx)
+// Gauge callbacks (pending/stuck) are wired automatically when Start() is called.
 ```
 
 Available metrics:
@@ -512,12 +549,15 @@ Available metrics:
 
 ### PostgreSQL
 
-- Uses `FOR UPDATE SKIP LOCKED` for safe concurrent processing
-- Transactional batch processing
-- Index on `scheduled_at` for efficient queries
+- 2-phase claim using a `status`/`claimed_at` column, with `FOR UPDATE SKIP
+  LOCKED` so concurrent instances claim disjoint batches; the transport publish
+  happens outside any row lock
+- Composite index on `(status, scheduled_at)` for efficient claiming
+- Automatic recovery of stuck messages
 - Use `EnsureTable()` to auto-create schema
 - Use `MigrateAddRetryCount()` to add retry_count to tables created before v0.5.0
 - Use `MigrateAddRecurrence()` to add recurrence columns to tables created before v0.7.0
+- Use `MigrateAddProcessingState()` to add the `status`/`claimed_at` columns to tables created before 2-phase claim support
 
 ## High Availability
 

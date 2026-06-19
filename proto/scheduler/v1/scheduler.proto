@@ -58,14 +58,16 @@ message ListRequest {
 
   // Maximum number of messages to return (0 = server default).
   int32 limit = 4;
+
+  // Number of leading messages to skip, for pagination (0 = none).
+  int32 offset = 5;
 }
 
 // ListResponse is the response for List.
 message ListResponse {
   repeated Message messages = 1;
 
-  // Total number of messages returned. Consumers can compare this
-  // with the requested limit to determine if results were truncated.
+  // Number of messages contained in this response (== len(messages)).
   int32 total_count = 2;
 }
 
@@ -95,6 +97,28 @@ message HealthResponse {
   map<string, string> details = 4;
 }
 
+// RecurrenceType enumerates how a scheduled message repeats.
+enum RecurrenceType {
+  RECURRENCE_TYPE_UNSPECIFIED = 0;
+  RECURRENCE_TYPE_INTERVAL = 1;
+  RECURRENCE_TYPE_CRON = 2;
+}
+
+// Recurrence describes the periodic re-delivery configuration of a message.
+message Recurrence {
+  // The recurrence pattern.
+  RecurrenceType type = 1;
+
+  // For INTERVAL, a Go duration string (e.g. "24h"); for CRON, the cron expression.
+  string value = 2;
+
+  // Maximum number of deliveries (0 = unlimited).
+  int32 max_occurrences = 3;
+
+  // Stops recurrence after this time (unset = no end date).
+  google.protobuf.Timestamp until = 4;
+}
+
 // Message represents a scheduled message.
 message Message {
   // Unique identifier.
@@ -117,4 +141,10 @@ message Message {
 
   // Number of delivery attempts.
   int32 retry_count = 7;
+
+  // Recurrence configuration (unset for one-shot messages).
+  Recurrence recurrence = 8;
+
+  // Number of times this recurring message has already fired.
+  int32 occurrence_count = 9;
 }

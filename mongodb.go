@@ -429,6 +429,9 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 			s.logger.Error("failed to claim due message", "error", err)
 			break
 		}
+		// Every claimed message counts as activity for adaptive polling, whether
+		// it is delivered, retried, or discarded — consistent across all backends.
+		processed++
 
 		if publishErr := publishScheduledMessage(ctx, s.transport, msg); publishErr != nil {
 			s.logger.Error("failed to publish scheduled message",
@@ -451,7 +454,6 @@ func (s *MongoScheduler) processDue(ctx context.Context) int {
 		} else {
 			s.rescheduleRecurring(ctx, msg, outcome)
 		}
-		processed++
 	}
 	return processed
 }

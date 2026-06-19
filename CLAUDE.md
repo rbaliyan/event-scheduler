@@ -46,18 +46,24 @@ Event Scheduler (`github.com/rbaliyan/event-scheduler`) is a production-grade de
 
 **PostgreSQL Scheduler (postgres.go)** - PostgreSQL implementation:
 - Uses `scheduled_messages` table (configurable via `WithTable`)
-- Uses `FOR UPDATE SKIP LOCKED` for concurrent safety
-- Transactional batch processing
+- 2-phase claim: `claimDue()` flips due rows `pending` -> `processing` with
+  `UPDATE ... FOR UPDATE SKIP LOCKED ... RETURNING` (concurrency-safe, short tx),
+  the transport publish happens outside any row lock, then a follow-up tx
+  deletes/reschedules each row
+- Automatic stuck message recovery (`recoverStuck()` resets `processing` rows
+  abandoned beyond `stuckDuration` back to `pending`)
+- Transactional batch finalization
 - JSONB metadata storage
 - `EnsureTable()` for auto-creating the schema
-- `MigrateAddRetryCount()` for upgrading existing tables
+- `MigrateAddRetryCount()`, `MigrateAddRecurrence()`, `MigrateAddProcessingState()` for upgrading existing tables
 - Full retry/backoff/maxRetries/DLQ support
 
 **gRPC Service (service/)** - Read-only gRPC API for operational tooling:
 - `service.New(scheduler) (*Service, error)` creates the gRPC server
 - RPCs: `Get` (by ID), `List` (with filter), `Health` (scheduler status)
 - `HealthStatus` proto enum: `HEALTHY`, `DEGRADED`, `UNHEALTHY`
-- `ListResponse` includes `total_count` for truncation detection
+- `Message` includes `recurrence` and `occurrence_count`; `ListRequest` supports `offset` for pagination
+- `ListResponse.total_count` is the number of messages in the response (`== len(messages)`)
 - Error mapping: `ErrNotFound` -> `NotFound`, `context.Canceled` -> `Canceled`, etc.
 - `Register(server)` registers the service with a gRPC server
 
@@ -185,32 +191,33 @@ If scheduler crashes after step 1, the `recoverStuck()` function moves messages 
 
 ### Health Check
 
-All scheduler implementations implement the `HealthChecker` interface for monitoring and readiness probes:
+All scheduler implementations satisfy the `HealthChecker` interface, which is a
+type alias for `health.Checker` from `github.com/rbaliyan/event/v3/health`:
 
 ```go
+// HealthChecker = health.Checker
 type HealthChecker interface {
-    Health(ctx context.Context) *HealthCheckResult
+    Health(ctx context.Context) *health.Result
 }
 
-type HealthCheckResult struct {
-    Status          HealthStatus   // healthy, degraded, unhealthy
-    Message         string
-    Latency         time.Duration
-    PendingMessages int64
-    StuckMessages   int64
-    Details         map[string]any
-    CheckedAt       time.Time
+// health.Result (from event/v3/health)
+type Result struct {
+    Status    health.Status  // StatusHealthy / StatusDegraded / StatusUnhealthy
+    Message   string
+    Latency   time.Duration
+    Details   map[string]any // includes "pending_messages", "stuck_messages", etc.
+    CheckedAt time.Time
 }
 ```
 
 The health check verifies:
 - Database connectivity (Redis ping, MongoDB ping, PostgreSQL ping)
-- Pending message count
-- Stuck message count (Redis/MongoDB only)
+- Pending message count (in `Details["pending_messages"]`)
+- Stuck message count (in `Details["stuck_messages"]`) — all three backends
 
-Returns `HealthStatusHealthy` if database is responsive and no stuck messages.
-Returns `HealthStatusDegraded` if stuck messages exist.
-Returns `HealthStatusUnhealthy` if database is not responsive.
+Returns `health.StatusHealthy` if the database is responsive and no stuck messages.
+Returns `health.StatusDegraded` if stuck messages exist.
+Returns `health.StatusUnhealthy` if the database is not responsive.
 
 ### Default Configuration
 
@@ -271,14 +278,17 @@ CREATE TABLE scheduled_messages (
     recurrence_value TEXT,
     max_occurrences  INTEGER NOT NULL DEFAULT 0,
     until            TIMESTAMP,
-    occurrence_count INTEGER NOT NULL DEFAULT 0
+    occurrence_count INTEGER NOT NULL DEFAULT 0,
+    status           VARCHAR(20) NOT NULL DEFAULT 'pending',
+    claimed_at       TIMESTAMP
 );
-CREATE INDEX idx_scheduled_due ON scheduled_messages(scheduled_at);
+CREATE INDEX idx_scheduled_due ON scheduled_messages(status, scheduled_at);
 ```
 
 Use `EnsureTable()` to auto-create. Migrations for existing tables:
 - `MigrateAddRetryCount()` — adds retry_count (tables pre-v0.5.0)
 - `MigrateAddRecurrence()` — adds the 5 recurrence columns (tables pre-v0.7.0)
+- `MigrateAddProcessingState()` — adds `status`/`claimed_at` for 2-phase claim support
 
 **Redis Keys**
 - `{prefix}messages`: Sorted set, score=unix timestamp, member=msgID
