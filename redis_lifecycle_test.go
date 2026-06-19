@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -226,8 +227,135 @@ func TestRedisLifecycle_RecurringReschedules(t *testing.T) {
 	}
 }
 
+func TestRedisLifecycle_DLQPreservesPayloadAndErr(t *testing.T) {
+	dlq := &mockDLQ{}
+	sched, ft, cleanup := newMiniRedisScheduler(t, WithMaxRetries(1), WithDLQ(dlq))
+	defer cleanup()
+	ctx := context.Background()
+	pubErr := errors.New("boom-permanent")
+	ft.failNext(100, pubErr)
+
+	msg := Message{ID: "p1", EventName: "dlq.event", Payload: []byte("important-payload"),
+		Metadata: map[string]string{"k": "v"}, ScheduledAt: time.Now().Add(-time.Second)}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	for range 4 {
+		sched.processDue(ctx)
+		if _, err := sched.Get(ctx, "p1"); errors.Is(err, ErrNotFound) {
+			break
+		}
+	}
+
+	if len(dlq.messages) != 1 {
+		t.Fatalf("expected 1 DLQ entry, got %d", len(dlq.messages))
+	}
+	e := dlq.messages[0]
+	if string(e.Payload) != "important-payload" {
+		t.Errorf("DLQ payload = %q, want preserved", e.Payload)
+	}
+	if e.Metadata["k"] != "v" {
+		t.Errorf("DLQ metadata not preserved: %v", e.Metadata)
+	}
+	if !errors.Is(e.Err, pubErr) {
+		t.Errorf("DLQ Err = %v, want wraps %v", e.Err, pubErr)
+	}
+}
+
+func TestRedisLifecycle_DLQStoreFailureStillDiscards(t *testing.T) {
+	// When the DLQ store itself errors, the message must still be discarded (no
+	// infinite loop, no panic) — exercises the DLQ-store-error logging branch.
+	dlq := &mockDLQ{storeErr: errors.New("dlq down")}
+	sched, ft, cleanup := newMiniRedisScheduler(t, WithMaxRetries(1), WithDLQ(dlq))
+	defer cleanup()
+	ctx := context.Background()
+	ft.failNext(100, errors.New("permanent"))
+
+	msg := Message{ID: "df1", EventName: "e", Payload: []byte("p"), ScheduledAt: time.Now().Add(-time.Second)}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	for range 4 {
+		sched.processDue(ctx)
+		if _, err := sched.Get(ctx, "df1"); errors.Is(err, ErrNotFound) {
+			break
+		}
+	}
+	if _, err := sched.Get(ctx, "df1"); !errors.Is(err, ErrNotFound) {
+		t.Error("message should be discarded even when DLQ store fails")
+	}
+}
+
+func TestRedisLifecycle_RecurringUntilCrossingDeletes(t *testing.T) {
+	sched, ft, cleanup := newMiniRedisScheduler(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Next interval fire (now+1h) is past Until (now+30m), so after this single
+	// delivery the recurrence terminates and the message is deleted.
+	msg := Message{
+		ID: "u1", EventName: "e", Payload: []byte("p"), ScheduledAt: time.Now().Add(-time.Second),
+		Recurrence: &Recurrence{Type: RecurrenceInterval, Interval: time.Hour, Until: time.Now().Add(30 * time.Minute)},
+	}
+	if err := sched.Schedule(ctx, msg); err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	sched.processDue(ctx)
+	if ft.count() != 1 {
+		t.Fatalf("expected 1 delivery, got %d", ft.count())
+	}
+	if _, err := sched.Get(ctx, "u1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expected terminal delete after Until crossing, got err=%v", err)
+	}
+}
+
+func TestRedisLifecycle_CancelAndList(t *testing.T) {
+	sched, _, cleanup := newMiniRedisScheduler(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	for i := range 3 {
+		if err := sched.Schedule(ctx, Message{
+			ID: "l" + strconv.Itoa(i), EventName: "list.event", Payload: []byte("p"),
+			ScheduledAt: time.Now().Add(time.Duration(i+1) * time.Hour),
+		}); err != nil {
+			t.Fatalf("Schedule: %v", err)
+		}
+	}
+
+	all, err := sched.List(ctx, Filter{})
+	if err != nil || len(all) != 3 {
+		t.Fatalf("List all = %d, %v; want 3, nil", len(all), err)
+	}
+	// Ascending by scheduled_at.
+	if all[0].ID != "l0" || all[2].ID != "l2" {
+		t.Errorf("List not ordered by scheduled_at: %v", []string{all[0].ID, all[1].ID, all[2].ID})
+	}
+
+	filtered, err := sched.List(ctx, Filter{EventName: "list.event", Limit: 2})
+	if err != nil || len(filtered) != 2 {
+		t.Errorf("filtered List = %d, %v; want 2, nil", len(filtered), err)
+	}
+
+	if err := sched.Cancel(ctx, "l1"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := sched.Get(ctx, "l1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get after cancel: expected ErrNotFound, got %v", err)
+	}
+	if err := sched.Cancel(ctx, "l1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("re-Cancel: expected ErrNotFound, got %v", err)
+	}
+	if remaining, _ := sched.List(ctx, Filter{}); len(remaining) != 2 {
+		t.Errorf("after cancel, List = %d, want 2", len(remaining))
+	}
+}
+
 func TestRedisLifecycle_RecoverStuck(t *testing.T) {
-	sched, _, cleanup := newMiniRedisScheduler(t, WithStuckDuration(time.Millisecond))
+	sched, _, cleanup := newMiniRedisScheduler(t) // default 5m stuckDuration
 	defer cleanup()
 	ctx := context.Background()
 
@@ -242,8 +370,13 @@ func TestRedisLifecycle_RecoverStuck(t *testing.T) {
 		t.Fatalf("claimDueMessage: %v", err)
 	}
 
-	// Before recovery, it should be counted as stuck (claimed beyond stuckDuration).
-	time.Sleep(10 * time.Millisecond)
+	// Deterministically age the claim past stuckDuration by rewriting its score
+	// in the processing set to an hour ago — no real-time sleep needed.
+	oldScore := float64(time.Now().Add(-time.Hour).Unix())
+	if err := sched.client.ZAdd(ctx, sched.processingKey(), redis.Z{Score: oldScore, Member: "stuck1"}).Err(); err != nil {
+		t.Fatalf("age processing entry: %v", err)
+	}
+
 	stuck, err := sched.countStuck(ctx)
 	if err != nil {
 		t.Fatalf("countStuck: %v", err)

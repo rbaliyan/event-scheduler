@@ -13,6 +13,7 @@ import (
 // --- Options tests ---
 
 func TestDefaultOptions(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 
 	if o.pollInterval != 100*time.Millisecond {
@@ -42,6 +43,7 @@ func TestDefaultOptions(t *testing.T) {
 }
 
 func TestWithPollInterval(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithPollInterval(500 * time.Millisecond)(o)
 
@@ -51,6 +53,7 @@ func TestWithPollInterval(t *testing.T) {
 }
 
 func TestWithPollInterval_IgnoresZeroAndNegative(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	original := o.pollInterval
 
@@ -66,6 +69,7 @@ func TestWithPollInterval_IgnoresZeroAndNegative(t *testing.T) {
 }
 
 func TestWithBatchSize(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithBatchSize(50)(o)
 
@@ -75,6 +79,7 @@ func TestWithBatchSize(t *testing.T) {
 }
 
 func TestWithBatchSize_IgnoresZeroAndNegative(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	original := o.batchSize
 
@@ -90,6 +95,7 @@ func TestWithBatchSize_IgnoresZeroAndNegative(t *testing.T) {
 }
 
 func TestWithKeyPrefix(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithKeyPrefix("myapp:")(o)
 
@@ -99,6 +105,7 @@ func TestWithKeyPrefix(t *testing.T) {
 }
 
 func TestWithKeyPrefix_IgnoresEmpty(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	original := o.keyPrefix
 
@@ -109,6 +116,7 @@ func TestWithKeyPrefix_IgnoresEmpty(t *testing.T) {
 }
 
 func TestWithTable(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithTable("my_jobs")(o)
 
@@ -118,6 +126,7 @@ func TestWithTable(t *testing.T) {
 }
 
 func TestWithTable_IgnoresEmpty(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	original := o.table
 
@@ -128,6 +137,7 @@ func TestWithTable_IgnoresEmpty(t *testing.T) {
 }
 
 func TestWithCollection(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithCollection("my_jobs")(o)
 
@@ -137,6 +147,7 @@ func TestWithCollection(t *testing.T) {
 }
 
 func TestWithCollection_IgnoresEmpty(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	original := o.collection
 
@@ -147,6 +158,7 @@ func TestWithCollection_IgnoresEmpty(t *testing.T) {
 }
 
 func TestWithBackoff(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	b := &mockBackoff{delay: time.Second}
 	WithBackoff(b)(o)
@@ -157,6 +169,7 @@ func TestWithBackoff(t *testing.T) {
 }
 
 func TestWithMaxRetries(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithMaxRetries(5)(o)
 
@@ -166,6 +179,7 @@ func TestWithMaxRetries(t *testing.T) {
 }
 
 func TestWithMaxRetries_AllowsZero(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithMaxRetries(5)(o)
 	WithMaxRetries(0)(o)
@@ -176,6 +190,7 @@ func TestWithMaxRetries_AllowsZero(t *testing.T) {
 }
 
 func TestMultipleOptionsApplied(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	for _, opt := range []Option{
 		WithPollInterval(200 * time.Millisecond),
@@ -203,6 +218,7 @@ func TestMultipleOptionsApplied(t *testing.T) {
 // --- Message tests ---
 
 func TestMessageCreation(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	msg := Message{
 		ID:          "test-id",
@@ -231,6 +247,7 @@ func TestMessageCreation(t *testing.T) {
 }
 
 func TestMessageRetryCount(t *testing.T) {
+	t.Parallel()
 	msg := Message{RetryCount: 3}
 	if msg.RetryCount != 3 {
 		t.Errorf("expected RetryCount 3, got %d", msg.RetryCount)
@@ -240,6 +257,7 @@ func TestMessageRetryCount(t *testing.T) {
 // --- Filter tests ---
 
 func TestFilterDefaults(t *testing.T) {
+	t.Parallel()
 	f := Filter{}
 
 	if f.EventName != "" {
@@ -260,6 +278,7 @@ func TestFilterDefaults(t *testing.T) {
 }
 
 func TestFilterWithAllFields(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	f := Filter{
 		EventName: "test.event",
@@ -301,6 +320,7 @@ func (m *mockBackoff) Reset() {
 }
 
 func TestBackoffStrategyInterface(t *testing.T) {
+	t.Parallel()
 	b := &mockBackoff{delay: 100 * time.Millisecond}
 
 	// Attempt 0 (first retry)
@@ -447,6 +467,7 @@ var _ Scheduler = (*memoryScheduler)(nil)
 // --- Scheduler interface contract tests ---
 
 func TestSchedulerContract_ScheduleAndGet(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -484,6 +505,7 @@ func TestSchedulerContract_ScheduleAndGet(t *testing.T) {
 }
 
 func TestSchedulerContract_Cancel(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -508,6 +530,7 @@ func TestSchedulerContract_Cancel(t *testing.T) {
 }
 
 func TestSchedulerContract_CancelNotFound(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -518,6 +541,7 @@ func TestSchedulerContract_CancelNotFound(t *testing.T) {
 }
 
 func TestSchedulerContract_GetNotFound(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -528,6 +552,7 @@ func TestSchedulerContract_GetNotFound(t *testing.T) {
 }
 
 func TestSchedulerContract_DuplicateSchedule(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -548,11 +573,12 @@ func TestSchedulerContract_DuplicateSchedule(t *testing.T) {
 }
 
 func TestSchedulerContract_ListAll(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
 	now := time.Now()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		msg := Message{
 			ID:          fmt.Sprintf("msg-%d", i),
 			EventName:   "test.event",
@@ -575,6 +601,7 @@ func TestSchedulerContract_ListAll(t *testing.T) {
 }
 
 func TestSchedulerContract_ListWithEventFilter(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -603,11 +630,12 @@ func TestSchedulerContract_ListWithEventFilter(t *testing.T) {
 }
 
 func TestSchedulerContract_ListWithLimit(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
 	now := time.Now()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		msg := Message{
 			ID:          fmt.Sprintf("msg-%d", i),
 			EventName:   "test.event",
@@ -630,11 +658,12 @@ func TestSchedulerContract_ListWithLimit(t *testing.T) {
 }
 
 func TestSchedulerContract_ListWithOffset(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
 	now := time.Now()
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		msg := Message{
 			ID:          fmt.Sprintf("off-%d", i),
 			EventName:   "test.event",
@@ -685,6 +714,7 @@ func TestSchedulerContract_ListWithOffset(t *testing.T) {
 }
 
 func TestSchedulerContract_ListWithTimeFilter(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -717,6 +747,7 @@ func TestSchedulerContract_ListWithTimeFilter(t *testing.T) {
 }
 
 func TestSchedulerContract_ListEmpty(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -730,6 +761,7 @@ func TestSchedulerContract_ListEmpty(t *testing.T) {
 }
 
 func TestSchedulerContract_StartStop(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -754,6 +786,7 @@ func TestSchedulerContract_StartStop(t *testing.T) {
 }
 
 func TestSchedulerContract_StartCancelledContext(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -779,6 +812,7 @@ func TestSchedulerContract_StartCancelledContext(t *testing.T) {
 type mockDLQ struct {
 	mu       sync.Mutex
 	messages []dlqEntry
+	storeErr error // when set, Store returns this error (still records the attempt)
 }
 
 type dlqEntry struct {
@@ -803,13 +837,14 @@ func (m *mockDLQ) Store(ctx context.Context, params DLQStoreParams) error {
 		RetryCount: params.RetryCount,
 		Source:     params.Source,
 	})
-	return nil
+	return m.storeErr
 }
 
 // Compile-time check that mockDLQ satisfies DeadLetterQueue
 var _ DeadLetterQueue = (*mockDLQ)(nil)
 
 func TestWithDLQ(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	d := &mockDLQ{}
 	WithDLQ(d)(o)
@@ -819,6 +854,7 @@ func TestWithDLQ(t *testing.T) {
 }
 
 func TestWithDLQ_Nil(t *testing.T) {
+	t.Parallel()
 	o := defaultOptions()
 	WithDLQ(nil)(o)
 	if o.dlq != nil {
@@ -829,6 +865,7 @@ func TestWithDLQ_Nil(t *testing.T) {
 // --- ErrNotFound tests ---
 
 func TestErrNotFound_Cancel(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -842,6 +879,7 @@ func TestErrNotFound_Cancel(t *testing.T) {
 }
 
 func TestErrNotFound_Get(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -855,6 +893,7 @@ func TestErrNotFound_Get(t *testing.T) {
 }
 
 func TestErrNotFound_ContainsID(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 
@@ -874,6 +913,7 @@ func TestErrNotFound_ContainsID(t *testing.T) {
 // --- Double Stop tests ---
 
 func TestDoubleStop_NoPanic(t *testing.T) {
+	t.Parallel()
 	s := newMemoryScheduler()
 	ctx := context.Background()
 

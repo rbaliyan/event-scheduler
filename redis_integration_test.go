@@ -45,7 +45,7 @@ func setupRedisScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Redi
 		client.Close()
 	}
 
-	return sched, cleanup
+	return sched, registerCleanup(t, cleanup)
 }
 
 func TestRedis_Integration_ScheduleAndGet(t *testing.T) {

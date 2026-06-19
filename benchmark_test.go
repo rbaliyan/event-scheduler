@@ -2,167 +2,224 @@ package scheduler
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/rbaliyan/event/v3/transport"
+	"github.com/redis/go-redis/v9"
 )
 
-// mockBenchStore wraps a mock store for benchmarking
-type mockBenchStore struct {
-	messages map[string]*Message
-}
+// benchNoopTransport is a zero-allocation transport for isolating the cost of
+// the code under benchmark from any transport work.
+type benchNoopTransport struct{}
 
-func newMockBenchStore() *mockBenchStore {
-	return &mockBenchStore{
-		messages: make(map[string]*Message),
+func (benchNoopTransport) Publish(context.Context, string, transport.Message) error { return nil }
+func (benchNoopTransport) RegisterEvent(context.Context, string) error              { return nil }
+func (benchNoopTransport) UnregisterEvent(context.Context, string) error            { return nil }
+func (benchNoopTransport) Subscribe(context.Context, string, ...transport.SubscribeOption) (transport.Subscription, error) {
+	return nil, errors.New("not implemented")
+}
+func (benchNoopTransport) Close(context.Context) error { return nil }
+
+// benchEpoch is a fixed clock for pure benchmarks so absolute numbers are
+// bit-stable across runs (Date.now() is unavailable here anyway).
+var benchEpoch = time.Unix(1700000000, 0)
+
+// --- Pure decision-logic benchmarks (no I/O, deterministic) ---
+
+func BenchmarkComputeNextSchedule_Interval(b *testing.B) {
+	msg := &Message{Recurrence: &Recurrence{Type: RecurrenceInterval, Interval: time.Hour}}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = computeNextSchedule(msg, benchEpoch)
 	}
 }
 
-func (s *mockBenchStore) Schedule(ctx context.Context, msg Message) error {
-	s.messages[msg.ID] = &msg
-	return nil
-}
-
-func (s *mockBenchStore) Cancel(ctx context.Context, id string) error {
-	delete(s.messages, id)
-	return nil
-}
-
-func (s *mockBenchStore) Get(ctx context.Context, id string) (*Message, error) {
-	if msg, ok := s.messages[id]; ok {
-		return msg, nil
-	}
-	return nil, ErrNotFound
-}
-
-func (s *mockBenchStore) List(ctx context.Context, filter Filter) ([]*Message, error) {
-	var result []*Message
-	for _, msg := range s.messages {
-		result = append(result, msg)
-		if filter.Limit > 0 && len(result) >= filter.Limit {
-			break
-		}
-	}
-	return result, nil
-}
-
-// BenchmarkMessageCreation benchmarks creating Message structs
-func BenchmarkMessageCreation(b *testing.B) {
-	now := time.Now()
-	payload := []byte(`{"order_id": "12345", "amount": 99.99}`)
-	metadata := map[string]string{"source": "checkout"}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = Message{
-			ID:          "msg-" + string(rune(i)),
-			EventName:   "orders.created",
-			Payload:     payload,
-			Metadata:    metadata,
-			ScheduledAt: now.Add(time.Hour),
-			CreatedAt:   now,
-		}
+func BenchmarkComputeNextSchedule_Cron(b *testing.B) {
+	// Exposes the per-call cron.ParseStandard cost on the recurring hot path.
+	msg := &Message{Recurrence: &Recurrence{Type: RecurrenceCron, Cron: "*/5 * * * *"}}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = computeNextSchedule(msg, benchEpoch)
 	}
 }
 
-// BenchmarkMockStoreSchedule benchmarks the Schedule operation with mock store
-func BenchmarkMockStoreSchedule(b *testing.B) {
+func BenchmarkMongoCodecRoundTrip(b *testing.B) {
+	// Backend codec parity with the Redis JSON path: BSON struct build + decode.
+	msg := &Message{
+		ID: "m", EventName: "orders.created", Payload: []byte("p"),
+		Metadata:   map[string]string{"k": "v"},
+		Recurrence: &Recurrence{Type: RecurrenceInterval, Interval: time.Hour, MaxOccurrences: 5},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = fromMessage(msg).toMessage()
+	}
+}
+
+func BenchmarkHandleDeliveryFailure_Retry(b *testing.B) {
+	opts := defaultOptions()
+	logger := discardLogger()
+	pubErr := errors.New("boom")
 	ctx := context.Background()
-	store := newMockBenchStore()
-	payload := []byte(`{"order_id": "12345"}`)
-	now := time.Now()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		msg := Message{
-			ID:          "msg-" + string(rune(i)),
-			EventName:   "orders.created",
-			Payload:     payload,
-			ScheduledAt: now.Add(time.Hour),
-			CreatedAt:   now,
-		}
-		_ = store.Schedule(ctx, msg)
+	msg := &Message{ID: "m", EventName: "e"}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = handleDeliveryFailure(ctx, opts, msg, pubErr, logger)
 	}
 }
 
-// BenchmarkMockStoreGet benchmarks the Get operation with mock store
-func BenchmarkMockStoreGet(b *testing.B) {
+func BenchmarkHandleDeliveryFailure_Backoff(b *testing.B) {
+	opts := defaultOptions()
+	opts.backoff = &mockBackoff{delay: time.Second}
+	logger := discardLogger()
+	pubErr := errors.New("boom")
 	ctx := context.Background()
-	store := newMockBenchStore()
-	payload := []byte(`{"order_id": "12345"}`)
-	now := time.Now()
-
-	// Pre-populate store
-	for i := 0; i < 1000; i++ {
-		msg := Message{
-			ID:          "msg-" + string(rune(i)),
-			EventName:   "orders.created",
-			Payload:     payload,
-			ScheduledAt: now.Add(time.Hour),
-			CreatedAt:   now,
-		}
-		_ = store.Schedule(ctx, msg)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = store.Get(ctx, "msg-"+string(rune(i%1000)))
+	msg := &Message{ID: "m", EventName: "e", RetryCount: 3}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = handleDeliveryFailure(ctx, opts, msg, pubErr, logger)
 	}
 }
 
-// BenchmarkMockStoreList benchmarks the List operation with mock store
-func BenchmarkMockStoreList(b *testing.B) {
+func BenchmarkValidateRecurrence_Cron(b *testing.B) {
+	r := &Recurrence{Type: RecurrenceCron, Cron: "0 9 * * 1-5"}
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = validateRecurrence(r)
+	}
+}
+
+func BenchmarkEncodeDecodeRecurrence(b *testing.B) {
+	r := &Recurrence{Type: RecurrenceInterval, Interval: 90 * time.Minute, MaxOccurrences: 5}
+	b.ReportAllocs()
+	for b.Loop() {
+		rt, rv, mo, until := encodeRecurrence(r)
+		_ = rt
+		_ = rv
+		_ = mo
+		_ = until
+	}
+}
+
+func BenchmarkAdaptivePollAdjust(b *testing.B) {
+	s := newAdaptivePollState(100*time.Millisecond, 10*time.Millisecond, 5*time.Second)
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		_ = s.adjust(i % 2) // alternate busy/idle
+		i++
+	}
+}
+
+func BenchmarkPublishScheduledMessage(b *testing.B) {
+	t := benchNoopTransport{}
 	ctx := context.Background()
-	store := newMockBenchStore()
-	payload := []byte(`{"order_id": "12345"}`)
-	now := time.Now()
-
-	// Pre-populate store
-	for i := 0; i < 1000; i++ {
-		msg := Message{
-			ID:          "msg-" + string(rune(i)),
-			EventName:   "orders.created",
-			Payload:     payload,
-			ScheduledAt: now.Add(time.Hour),
-			CreatedAt:   now,
-		}
-		_ = store.Schedule(ctx, msg)
+	msg := &Message{
+		ID: "m", EventName: "orders.created",
+		Payload:  []byte(`{"order_id":"12345","amount":99.99}`),
+		Metadata: map[string]string{"source": "checkout", "region": "us-east"},
 	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = store.List(ctx, Filter{Limit: 100})
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = publishScheduledMessage(ctx, t, msg)
 	}
 }
 
-// BenchmarkOptionsApply benchmarks applying options
-func BenchmarkOptionsApply(b *testing.B) {
-	opts := []Option{
-		WithPollInterval(50 * time.Millisecond),
-		WithBatchSize(200),
-		WithKeyPrefix("bench:"),
-		WithMaxRetries(5),
-	}
+// --- Redis backend benchmarks via in-memory miniredis (no Docker) ---
+//
+// miniredis measures serialization + the Lua claim logic, not real network
+// RTT, so absolute numbers are a lower bound — use them for regression deltas.
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		o := defaultOptions()
-		for _, opt := range opts {
-			opt(o)
-		}
+func benchRedis(b *testing.B) *RedisScheduler {
+	b.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		b.Fatalf("miniredis.Run: %v", err)
+	}
+	b.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	b.Cleanup(func() { _ = client.Close() })
+	s, err := NewRedisScheduler(client, benchNoopTransport{})
+	if err != nil {
+		b.Fatalf("NewRedisScheduler: %v", err)
+	}
+	return s
+}
+
+func BenchmarkRedisSchedule(b *testing.B) {
+	for _, size := range []int{64, 1024, 16384} {
+		b.Run(strconv.Itoa(size)+"B", func(b *testing.B) {
+			s := benchRedis(b)
+			ctx := context.Background()
+			payload := make([]byte, size)
+			b.ReportAllocs()
+			i := 0
+			for b.Loop() {
+				_ = s.Schedule(ctx, Message{
+					ID: strconv.Itoa(i), EventName: "e", Payload: payload,
+					ScheduledAt: time.Now().Add(time.Hour),
+				})
+				i++
+			}
+		})
 	}
 }
 
-// BenchmarkFilterCreation benchmarks creating Filter structs
-func BenchmarkFilterCreation(b *testing.B) {
-	now := time.Now()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = Filter{
-			EventName: "orders.created",
-			Before:    now.Add(time.Hour),
-			After:     now.Add(-time.Hour),
-			Limit:     100,
+func BenchmarkRedisProcessDue(b *testing.B) {
+	s := benchRedis(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		b.StopTimer()
+		// Seed a batch of due messages, then measure one processDue pass.
+		for i := range 100 {
+			_ = s.Schedule(ctx, Message{
+				ID: "due-" + strconv.Itoa(i), EventName: "e", Payload: []byte("p"),
+				ScheduledAt: time.Now().Add(-time.Second),
+			})
 		}
+		b.StartTimer()
+		s.processDue(ctx)
+		b.ReportMetric(100, "msgs/op") // each pass drains the 100-message batch
 	}
+}
+
+func BenchmarkRedisClaim(b *testing.B) {
+	s := benchRedis(b)
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		b.StopTimer()
+		_ = s.Schedule(ctx, Message{
+			ID: "c", EventName: "e", Payload: []byte("p"),
+			ScheduledAt: time.Now().Add(-time.Second),
+		})
+		b.StartTimer()
+		_, _, _ = s.claimDueMessage(ctx, time.Now().Unix())
+	}
+}
+
+// BenchmarkRedisClaim_Parallel measures concurrent claim contention — the
+// real HA pattern where multiple scheduler instances claim against one store.
+func BenchmarkRedisClaim_Parallel(b *testing.B) {
+	s := benchRedis(b)
+	ctx := context.Background()
+	const seed = 5000
+	for i := range seed {
+		_ = s.Schedule(ctx, Message{
+			ID: strconv.Itoa(i), EventName: "e", Payload: []byte("p"),
+			ScheduledAt: time.Now().Add(-time.Second),
+		})
+	}
+	b.ReportAllocs()
+	b.ResetTimer() // exclude seeding from the measurement
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_, _, _ = s.claimDueMessage(ctx, time.Now().Unix())
+		}
+	})
 }

@@ -9,12 +9,14 @@ import (
 // --- validateRecurrence tests ---
 
 func TestValidateRecurrence_Nil(t *testing.T) {
+	t.Parallel()
 	if err := validateRecurrence(nil); err != nil {
 		t.Errorf("expected nil error for nil recurrence, got %v", err)
 	}
 }
 
 func TestValidateRecurrence_Interval_Valid(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: RecurrenceInterval, Interval: time.Hour}
 	if err := validateRecurrence(r); err != nil {
 		t.Errorf("expected valid interval recurrence, got %v", err)
@@ -22,6 +24,7 @@ func TestValidateRecurrence_Interval_Valid(t *testing.T) {
 }
 
 func TestValidateRecurrence_Interval_Zero(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: RecurrenceInterval, Interval: 0}
 	if err := validateRecurrence(r); err == nil {
 		t.Error("expected error for zero interval")
@@ -29,6 +32,7 @@ func TestValidateRecurrence_Interval_Zero(t *testing.T) {
 }
 
 func TestValidateRecurrence_Interval_Negative(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: RecurrenceInterval, Interval: -time.Second}
 	if err := validateRecurrence(r); err == nil {
 		t.Error("expected error for negative interval")
@@ -36,6 +40,7 @@ func TestValidateRecurrence_Interval_Negative(t *testing.T) {
 }
 
 func TestValidateRecurrence_Cron_Valid(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: RecurrenceCron, Cron: "0 9 * * 1-5"}
 	if err := validateRecurrence(r); err != nil {
 		t.Errorf("expected valid cron recurrence, got %v", err)
@@ -43,6 +48,7 @@ func TestValidateRecurrence_Cron_Valid(t *testing.T) {
 }
 
 func TestValidateRecurrence_Cron_Invalid(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: RecurrenceCron, Cron: "not a cron expression"}
 	if err := validateRecurrence(r); err == nil {
 		t.Error("expected error for invalid cron expression")
@@ -50,6 +56,7 @@ func TestValidateRecurrence_Cron_Invalid(t *testing.T) {
 }
 
 func TestValidateRecurrence_Cron_Empty(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: RecurrenceCron, Cron: ""}
 	if err := validateRecurrence(r); err == nil {
 		t.Error("expected error for empty cron expression")
@@ -57,6 +64,7 @@ func TestValidateRecurrence_Cron_Empty(t *testing.T) {
 }
 
 func TestValidateRecurrence_UnknownType(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{Type: "unknown"}
 	if err := validateRecurrence(r); err == nil {
 		t.Error("expected error for unknown recurrence type")
@@ -64,6 +72,7 @@ func TestValidateRecurrence_UnknownType(t *testing.T) {
 }
 
 func TestValidateRecurrence_UntilInPast(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{
 		Type:     RecurrenceInterval,
 		Interval: time.Hour,
@@ -75,6 +84,7 @@ func TestValidateRecurrence_UntilInPast(t *testing.T) {
 }
 
 func TestValidateRecurrence_UntilInFuture(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{
 		Type:     RecurrenceInterval,
 		Interval: time.Hour,
@@ -86,6 +96,7 @@ func TestValidateRecurrence_UntilInFuture(t *testing.T) {
 }
 
 func TestValidateRecurrence_MaxOccurrences(t *testing.T) {
+	t.Parallel()
 	r := &Recurrence{
 		Type:           RecurrenceInterval,
 		Interval:       time.Minute,
@@ -99,6 +110,7 @@ func TestValidateRecurrence_MaxOccurrences(t *testing.T) {
 // --- computeNextSchedule tests ---
 
 func TestComputeNextSchedule_OneShot(t *testing.T) {
+	t.Parallel()
 	msg := &Message{EventName: "test", OccurrenceCount: 0}
 	outcome := computeNextSchedule(msg, time.Now())
 	if !outcome.terminal {
@@ -107,6 +119,7 @@ func TestComputeNextSchedule_OneShot(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Interval_Continues(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	msg := &Message{
 		EventName:       "test",
@@ -130,6 +143,7 @@ func TestComputeNextSchedule_Interval_Continues(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Interval_MaxOccurrences_Reached(t *testing.T) {
+	t.Parallel()
 	msg := &Message{
 		EventName:       "test",
 		OccurrenceCount: 4, // about to complete the 5th delivery
@@ -146,6 +160,7 @@ func TestComputeNextSchedule_Interval_MaxOccurrences_Reached(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Interval_MaxOccurrences_NotYet(t *testing.T) {
+	t.Parallel()
 	msg := &Message{
 		EventName:       "test",
 		OccurrenceCount: 3, // 4th delivery, max is 5
@@ -165,6 +180,7 @@ func TestComputeNextSchedule_Interval_MaxOccurrences_NotYet(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Interval_Until_Expired(t *testing.T) {
+	t.Parallel()
 	// next would be in 1h, but Until is in 30min
 	now := time.Now()
 	msg := &Message{
@@ -183,6 +199,7 @@ func TestComputeNextSchedule_Interval_Until_Expired(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Interval_Until_NotExpired(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	msg := &Message{
 		EventName:       "test",
@@ -200,6 +217,7 @@ func TestComputeNextSchedule_Interval_Until_NotExpired(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Cron_Continues(t *testing.T) {
+	t.Parallel()
 	// Use a cron that fires every minute
 	msg := &Message{
 		EventName:       "test",
@@ -227,6 +245,7 @@ func TestComputeNextSchedule_Cron_Continues(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Cron_MaxOccurrences(t *testing.T) {
+	t.Parallel()
 	msg := &Message{
 		EventName:       "test",
 		OccurrenceCount: 2,
@@ -243,6 +262,7 @@ func TestComputeNextSchedule_Cron_MaxOccurrences(t *testing.T) {
 }
 
 func TestComputeNextSchedule_Cron_Until(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	msg := &Message{
 		EventName:       "test",
@@ -265,6 +285,7 @@ func TestComputeNextSchedule_Cron_Until(t *testing.T) {
 }
 
 func TestComputeNextSchedule_UnknownType(t *testing.T) {
+	t.Parallel()
 	msg := &Message{
 		EventName: "test",
 		Recurrence: &Recurrence{
@@ -280,6 +301,7 @@ func TestComputeNextSchedule_UnknownType(t *testing.T) {
 // --- encodeRecurrence / decodeRecurrence roundtrip ---
 
 func TestEncodeDecodeRecurrence_Nil(t *testing.T) {
+	t.Parallel()
 	recType, recVal, maxOcc, until := encodeRecurrence(nil)
 	if recType != nil || recVal != nil || maxOcc != 0 || until != nil {
 		t.Error("expected all nil/zero for nil recurrence")
@@ -296,6 +318,7 @@ func TestEncodeDecodeRecurrence_Nil(t *testing.T) {
 }
 
 func TestEncodeDecodeRecurrence_Interval(t *testing.T) {
+	t.Parallel()
 	original := &Recurrence{
 		Type:           RecurrenceInterval,
 		Interval:       90 * time.Minute,
@@ -337,6 +360,7 @@ func TestEncodeDecodeRecurrence_Interval(t *testing.T) {
 }
 
 func TestEncodeDecodeRecurrence_Cron(t *testing.T) {
+	t.Parallel()
 	until := time.Date(2026, 12, 31, 23, 59, 59, 0, time.UTC)
 	original := &Recurrence{
 		Type:  RecurrenceCron,
@@ -381,6 +405,7 @@ func TestEncodeDecodeRecurrence_Cron(t *testing.T) {
 // --- nextCronTime tests ---
 
 func TestNextCronTime_ValidExpression(t *testing.T) {
+	t.Parallel()
 	// "0 0 * * *" fires at midnight
 	after := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	next, err := nextCronTime("0 0 * * *", after)
@@ -394,6 +419,7 @@ func TestNextCronTime_ValidExpression(t *testing.T) {
 }
 
 func TestNextCronTime_InvalidExpression(t *testing.T) {
+	t.Parallel()
 	_, err := nextCronTime("invalid cron", time.Now())
 	if err == nil {
 		t.Error("expected error for invalid cron expression")
@@ -401,6 +427,7 @@ func TestNextCronTime_InvalidExpression(t *testing.T) {
 }
 
 func TestNextCronTime_EveryMinute(t *testing.T) {
+	t.Parallel()
 	after := time.Date(2026, 1, 1, 12, 30, 0, 0, time.UTC)
 	next, err := nextCronTime("* * * * *", after)
 	if err != nil {
@@ -415,6 +442,7 @@ func TestNextCronTime_EveryMinute(t *testing.T) {
 // --- Integration: computeNextSchedule with multiple deliveries ---
 
 func TestComputeNextSchedule_MultipleDeliveries(t *testing.T) {
+	t.Parallel()
 	// Simulate 5 interval deliveries, stopping at MaxOccurrences=5
 	now := time.Now()
 	msg := &Message{

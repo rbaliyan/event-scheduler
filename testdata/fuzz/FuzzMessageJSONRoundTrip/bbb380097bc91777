@@ -1,0 +1,8 @@
+go test fuzz v1
+string("0")
+string("0")
+[]byte("0")
+string("0")
+string("\xef")
+int(-1)
+int(99)

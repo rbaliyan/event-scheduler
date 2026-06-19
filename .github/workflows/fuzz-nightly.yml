@@ -1,0 +1,50 @@
+name: Fuzz (nightly)
+
+# Longer fuzzing campaign than the per-PR smoke run in ci.yml. Runs each target
+# for a few minutes and uploads any newly-discovered failing inputs as artifacts
+# so they can be added to the committed seed corpus under testdata/fuzz/.
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions: read-all
+
+jobs:
+  fuzz:
+    name: Fuzz campaign
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { pkg: ".", name: "FuzzMessageJSONRoundTrip" }
+          - { pkg: ".", name: "FuzzValidateRecurrence" }
+          - { pkg: ".", name: "FuzzComputeNextSchedule" }
+          - { pkg: ".", name: "FuzzDecodeRecurrence" }
+          - { pkg: ".", name: "FuzzMongoCodecRoundTrip" }
+          - { pkg: ".", name: "FuzzHandleDeliveryFailure" }
+          - { pkg: "./service", name: "FuzzMessageToProto" }
+          - { pkg: "./service", name: "FuzzProtoToFilter" }
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fuzz ${{ matrix.target.name }}
+        env:
+          FUZZ_PKG: ${{ matrix.target.pkg }}
+          FUZZ_NAME: ${{ matrix.target.name }}
+        run: go test -race -run '^$' -fuzz "^${FUZZ_NAME}\$" -fuzztime=4m "$FUZZ_PKG"
+
+      - name: Upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-failures-${{ matrix.target.name }}
+          path: "**/testdata/fuzz/**"
+          if-no-files-found: ignore

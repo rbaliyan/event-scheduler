@@ -54,7 +54,7 @@ func setupMongoScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*Mong
 		_ = client.Disconnect(ctx)
 	}
 
-	return sched, cleanup
+	return sched, registerCleanup(t, cleanup)
 }
 
 func TestMongo_Integration_ScheduleAndGet(t *testing.T) {

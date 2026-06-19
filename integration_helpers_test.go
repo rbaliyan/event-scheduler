@@ -236,6 +236,17 @@ func makeMessage(id, eventName string, scheduledAt time.Time) Message {
 	}
 }
 
+// registerCleanup wraps fn so it runs at most once and also registers it with
+// t.Cleanup. Resources are released even if a setup helper calls t.Fatal before
+// the caller's `defer cleanup()` is reached, and double-invocation is harmless.
+func registerCleanup(t *testing.T, fn func()) func() {
+	t.Helper()
+	var once sync.Once
+	wrapped := func() { once.Do(fn) }
+	t.Cleanup(wrapped)
+	return wrapped
+}
+
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
