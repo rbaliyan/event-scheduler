@@ -37,6 +37,7 @@ func runRetryLifecycle(opts *options, msg *Message) int {
 }
 
 func TestHandleDeliveryFailure_MaxRetriesAttemptCount(t *testing.T) {
+	t.Parallel()
 	// WithMaxRetries(n) must allow exactly n+1 total attempts (1 initial + n retries).
 	for _, maxRetries := range []int{1, 3, 5} {
 		opts := defaultOptions()
@@ -62,6 +63,7 @@ func TestHandleDeliveryFailure_MaxRetriesAttemptCount(t *testing.T) {
 }
 
 func TestHandleDeliveryFailure_InfiniteRetries(t *testing.T) {
+	t.Parallel()
 	// maxRetries=0 means retry indefinitely; the message must never be sent to DLQ.
 	opts := defaultOptions()
 	opts.maxRetries = 0
@@ -88,6 +90,7 @@ func TestHandleDeliveryFailure_InfiniteRetries(t *testing.T) {
 }
 
 func TestHandleDeliveryFailure_DLQParams(t *testing.T) {
+	t.Parallel()
 	opts := defaultOptions()
 	opts.maxRetries = 1
 	dlq := &mockDLQ{}
@@ -131,6 +134,7 @@ func TestHandleDeliveryFailure_DLQParams(t *testing.T) {
 }
 
 func TestHandleDeliveryFailure_NoDLQDiscards(t *testing.T) {
+	t.Parallel()
 	// Without a DLQ, exceeding retries must still terminate cleanly (discard, no panic).
 	opts := defaultOptions()
 	opts.maxRetries = 2
@@ -143,6 +147,7 @@ func TestHandleDeliveryFailure_NoDLQDiscards(t *testing.T) {
 }
 
 func TestHandleDeliveryFailure_BackoffDelay(t *testing.T) {
+	t.Parallel()
 	opts := defaultOptions()
 	opts.maxRetries = 0
 	backoff := &mockBackoff{delay: 100 * time.Millisecond}
@@ -164,6 +169,7 @@ func TestHandleDeliveryFailure_BackoffDelay(t *testing.T) {
 }
 
 func TestHandleDeliveryFailure_NoBackoffImmediate(t *testing.T) {
+	t.Parallel()
 	opts := defaultOptions() // no backoff
 	opts.maxRetries = 0
 
@@ -178,6 +184,7 @@ func TestHandleDeliveryFailure_NoBackoffImmediate(t *testing.T) {
 }
 
 func TestHandleSuccessfulDelivery_OneShotTerminal(t *testing.T) {
+	t.Parallel()
 	opts := defaultOptions()
 	msg := &Message{ID: "msg-1", EventName: "test.event"} // no recurrence
 
@@ -188,6 +195,7 @@ func TestHandleSuccessfulDelivery_OneShotTerminal(t *testing.T) {
 }
 
 func TestHandleSuccessfulDelivery_IntervalRecurring(t *testing.T) {
+	t.Parallel()
 	opts := defaultOptions()
 	now := time.Now()
 	msg := &Message{
@@ -213,6 +221,7 @@ func TestHandleSuccessfulDelivery_IntervalRecurring(t *testing.T) {
 }
 
 func TestHandleSuccessfulDelivery_MaxOccurrencesTerminal(t *testing.T) {
+	t.Parallel()
 	opts := defaultOptions()
 	msg := &Message{
 		ID:        "msg-1",

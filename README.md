@@ -578,22 +578,59 @@ sched, err := scheduler.NewRedisScheduler(rdb, t,
 
 ## Testing
 
+The default (untagged) suite is fully hermetic — no Docker required. Redis is
+exercised through an in-memory [`miniredis`](https://github.com/alicebob/miniredis)
+server, PostgreSQL through [`go-sqlmock`](https://github.com/DATA-DOG/go-sqlmock),
+MongoDB codec logic through pure round-trips, and metrics through an OpenTelemetry
+`ManualReader`. Integration tests against real backends are gated behind the
+`integration` build tag.
+
 ```bash
-# Unit tests
-go test ./...
+# Unit tests (hermetic, fast) + race detector
+go test -race ./...
 
-# Integration tests (requires Redis, MongoDB, PostgreSQL)
-go test -tags integration -v -count=1 -timeout 120s ./...
+# Coverage with the CI gate (>= 70%)
+just test-cover-gate
 
-# With custom service addresses
+# Benchmarks with allocation stats (pure logic + miniredis-backed backends)
+just bench                 # go test -run '^$' -bench=. -benchmem ./...
+go test -bench=. -benchmem -memprofile=mem.out -cpuprofile=cpu.out ./...  # add profiles
+# CI compares each PR's benchmarks against the merge-base with benchstat and
+# fails on a >=2x regression (.github/workflows/ci.yml: bench-regression job).
+
+# Fuzzing: run the seed corpora, or fuzz a single target
+just fuzz-seed
+just fuzz FuzzComputeNextSchedule 30s
+# Fuzz targets: message JSON round-trip, recurrence validation (validator vs
+# nextCronTime), computeNextSchedule liveness, recurrence decode, the MongoDB
+# decode boundary, retry/DLQ decision, proto message conversion, and the
+# gateway ListRequest->Filter decode. A nightly workflow
+# (.github/workflows/fuzz-nightly.yml) runs a longer -race campaign per target.
+#
+# Triage a nightly failure: download the failing-input artifact, drop it under
+# testdata/fuzz/<Target>/, then `go test -run <Target>/<hash>` reproduces it.
+
+# Smoke tests only (constructor guards, in-process round-trips)
+just smoke
+```
+
+### Integration tests (real Redis, MongoDB, PostgreSQL)
+
+```bash
+just compose-up           # start backends via docker-compose
+just test-integration     # run the -tags=integration suite (race-enabled)
+just test-pg              # or a single backend: test-pg / test-mongo / test-redis
+just compose-down
+
+# Or point at your own services:
 REDIS_ADDR=redis:6379 \
 MONGO_URI=mongodb://mongo:27017 \
 POSTGRES_DSN="postgres://user:pass@pg:5432/test?sslmode=disable" \
-  go test -tags integration -v -count=1 ./...
-
-# Race detection
-go test -tags integration -race -count=1 -timeout 120s ./...
+  go test -tags integration -race -count=1 -timeout 120s ./...
 ```
+
+CI runs the hermetic suite + coverage gate, smoke, fuzz (seeds + short run),
+benchmarks, and the full integration suite against service containers on every PR.
 
 ## Best Practices
 

@@ -16,7 +16,7 @@ import (
 	"github.com/rbaliyan/event/v3/health"
 	"github.com/rbaliyan/event/v3/transport"
 
-	_ "github.com/lib/pq" // ensure pq driver is registered; pq.Listener is used via opts.listener
+	"github.com/lib/pq" // pq driver registration, pq.Listener (via opts.listener), and pq.Array
 )
 
 /*
@@ -601,13 +601,13 @@ func (s *PostgresScheduler) applyBatchResults(ctx context.Context, toDelete, toD
 
 	if len(toDelete) > 0 {
 		// #nosec G201 -- table name is set at construction, not user input
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDelete); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), pq.Array(toDelete)); err != nil {
 			return fmt.Errorf("delete delivered messages: %w", err)
 		}
 	}
 	if len(toDiscard) > 0 {
 		// #nosec G201 -- table name is set at construction, not user input
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), toDiscard); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ANY($1)", s.table), pq.Array(toDiscard)); err != nil {
 			return fmt.Errorf("delete discarded messages: %w", err)
 		}
 	}

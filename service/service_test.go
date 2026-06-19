@@ -81,6 +81,7 @@ func (m *mockHealthScheduler) Health(_ context.Context) *health.Result {
 }
 
 func TestNew_NilScheduler(t *testing.T) {
+	t.Parallel()
 	_, err := New(nil)
 	if err == nil {
 		t.Fatal("expected error for nil scheduler")
@@ -88,6 +89,7 @@ func TestNew_NilScheduler(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
+	t.Parallel()
 	svc, err := New(newMockScheduler())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -98,6 +100,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestService_Get(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := newMockScheduler()
 	svc, err := New(mock)
@@ -140,6 +143,7 @@ func TestService_Get(t *testing.T) {
 }
 
 func TestService_Get_NotFound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, err := New(newMockScheduler())
 	if err != nil {
@@ -161,6 +165,7 @@ func TestService_Get_NotFound(t *testing.T) {
 }
 
 func TestService_Get_EmptyID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, err := New(newMockScheduler())
 	if err != nil {
@@ -179,6 +184,7 @@ func TestService_Get_EmptyID(t *testing.T) {
 }
 
 func TestService_List(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := newMockScheduler()
 	svc, err := New(mock)
@@ -216,6 +222,7 @@ func TestService_List(t *testing.T) {
 }
 
 func TestService_List_WithFilter(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := newMockScheduler()
 	svc, err := New(mock)
@@ -243,6 +250,7 @@ func TestService_List_WithFilter(t *testing.T) {
 }
 
 func TestService_List_LimitClamped(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := newMockScheduler()
 	svc, err := New(mock)
@@ -264,6 +272,7 @@ func TestService_List_LimitClamped(t *testing.T) {
 }
 
 func TestService_List_Error(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := newMockScheduler()
 	mock.listErr = errors.New("database error")
@@ -284,6 +293,7 @@ func TestService_List_Error(t *testing.T) {
 }
 
 func TestService_Health_WithChecker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := &mockHealthScheduler{
 		mockScheduler: newMockScheduler(),
@@ -325,6 +335,7 @@ func TestService_Health_WithChecker(t *testing.T) {
 }
 
 func TestService_Health_WithoutChecker(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	svc, err := New(newMockScheduler()) // plain mock does not implement HealthChecker
 	if err != nil {
@@ -342,6 +353,7 @@ func TestService_Health_WithoutChecker(t *testing.T) {
 }
 
 func TestService_Health_Degraded(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := &mockHealthScheduler{
 		mockScheduler: newMockScheduler(),
@@ -371,6 +383,7 @@ func TestService_Health_Degraded(t *testing.T) {
 }
 
 func TestService_Health_NilResult(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	mock := &mockHealthScheduler{
 		mockScheduler: newMockScheduler(),
@@ -392,6 +405,7 @@ func TestService_Health_NilResult(t *testing.T) {
 }
 
 func TestToGRPCError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -426,6 +440,7 @@ func TestToGRPCError(t *testing.T) {
 }
 
 func TestMessageToProto(t *testing.T) {
+	t.Parallel()
 	t.Run("nil message", func(t *testing.T) {
 		pb := messageToProto(nil)
 		if pb != nil {
@@ -549,6 +564,7 @@ func TestMessageToProto(t *testing.T) {
 }
 
 func TestProtoToFilter(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	before := now.Add(time.Hour)
 	after := now.Add(-time.Hour)
@@ -576,6 +592,7 @@ func TestProtoToFilter(t *testing.T) {
 }
 
 func TestProtoToFilter_Empty(t *testing.T) {
+	t.Parallel()
 	req := &schedulerpb.ListRequest{}
 	f := protoToFilter(req)
 	if f.EventName != "" {
@@ -593,6 +610,7 @@ func TestProtoToFilter_Empty(t *testing.T) {
 }
 
 func TestHealthToProto(t *testing.T) {
+	t.Parallel()
 	t.Run("nil result", func(t *testing.T) {
 		resp := healthToProto(nil)
 		if resp.Status != schedulerpb.HealthStatus_HEALTH_STATUS_UNHEALTHY {
@@ -633,6 +651,7 @@ func TestHealthToProto(t *testing.T) {
 }
 
 func TestDetailValueToString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		val  any

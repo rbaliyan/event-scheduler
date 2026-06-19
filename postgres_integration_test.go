@@ -49,7 +49,7 @@ func setupPostgresScheduler(t *testing.T, tr *mockTransport, opts ...Option) (*P
 		db.Close()
 	}
 
-	return sched, cleanup
+	return sched, registerCleanup(t, cleanup)
 }
 
 func TestPostgres_Integration_ScheduleAndGet(t *testing.T) {

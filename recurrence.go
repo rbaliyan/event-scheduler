@@ -102,6 +102,13 @@ func computeNextSchedule(msg *Message, now time.Time) recurrenceOutcome {
 	var next time.Time
 	switch r.Type {
 	case RecurrenceInterval:
+		// A non-positive interval cannot produce a strictly-increasing schedule
+		// (it would re-fire immediately in a hot loop). Schedule() rejects this
+		// via validateRecurrence, but a corrupt stored value could reach here;
+		// terminate rather than spin.
+		if r.Interval <= 0 {
+			return recurrenceOutcome{terminal: true}
+		}
 		next = now.Add(r.Interval)
 	case RecurrenceCron:
 		var err error
@@ -109,6 +116,12 @@ func computeNextSchedule(msg *Message, now time.Time) recurrenceOutcome {
 		if err != nil {
 			// Expression was validated at Schedule() time; this path should be
 			// unreachable. Terminate to avoid a permanently stuck message.
+			return recurrenceOutcome{terminal: true}
+		}
+		// A cron expression can parse yet have no future occurrence (e.g. an
+		// impossible day/month combination); robfig/cron returns the zero time.
+		// Treat that as terminal rather than rescheduling into the distant past.
+		if next.IsZero() {
 			return recurrenceOutcome{terminal: true}
 		}
 	default:
