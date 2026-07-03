@@ -59,6 +59,32 @@ func newMockTransport() *mockTransport {
 	}
 }
 
+// waitForListCount polls List with the given filter until it returns want
+// messages or the timeout elapses. The scheduler delivers in two phases —
+// publish, then delete — and WaitForPublish only signals the publish phase, so
+// a test that cancels the scheduler immediately after the last publish can race
+// the delete and observe stale rows. Poll the observable end state instead of
+// synchronizing on the publish signal.
+func waitForListCount(t *testing.T, sched Scheduler, filter Filter, want int, timeout time.Duration) []*Message {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(timeout)
+	var (
+		list []*Message
+		err  error
+	)
+	for {
+		list, err = sched.List(ctx, filter)
+		if err != nil {
+			t.Fatalf("List() error: %v", err)
+		}
+		if len(list) == want || time.Now().After(deadline) {
+			return list
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func (m *mockTransport) SetFailures(count int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

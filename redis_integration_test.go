@@ -182,17 +182,15 @@ func TestRedis_Integration_EventSetSyncAfterDelivery(t *testing.T) {
 
 	// Run one delivery cycle and wait for all 5 to be published.
 	deliverCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go sched.Start(deliverCtx)
 	for i := 0; i < 5; i++ {
 		mt.WaitForPublish(t, 5*time.Second)
 	}
-	cancel()
 
-	// After delivery, the event set must be empty.
-	list, err = sched.List(ctx, Filter{EventName: "sync.event"})
-	if err != nil {
-		t.Fatalf("post-delivery List() error: %v", err)
-	}
+	// After delivery, the event set must be empty. Poll for the delete phase to
+	// catch up rather than cancelling immediately after the publish signal.
+	list = waitForListCount(t, sched, Filter{EventName: "sync.event"}, 0, 5*time.Second)
 	if len(list) != 0 {
 		t.Errorf("expected 0 messages after delivery, got %d (event set not cleaned up)", len(list))
 	}
@@ -222,17 +220,15 @@ func TestRedis_Integration_ListEventNameAfterPartialDelivery(t *testing.T) {
 
 	// Deliver the 3 due messages.
 	deliverCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go sched.Start(deliverCtx)
 	for i := 0; i < 3; i++ {
 		mt.WaitForPublish(t, 5*time.Second)
 	}
-	cancel()
 
-	// Only the 2 future messages should remain.
-	list, err := sched.List(ctx, Filter{EventName: "partial.event"})
-	if err != nil {
-		t.Fatalf("List() error: %v", err)
-	}
+	// Only the 2 future messages should remain. Poll for the delete phase to
+	// catch up rather than cancelling immediately after the publish signal.
+	list := waitForListCount(t, sched, Filter{EventName: "partial.event"}, 2, 5*time.Second)
 	if len(list) != 2 {
 		t.Errorf("expected 2 remaining messages after partial delivery, got %d", len(list))
 	}
