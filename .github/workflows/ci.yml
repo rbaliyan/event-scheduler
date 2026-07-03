@@ -65,16 +65,22 @@ jobs:
       - name: Fuzz seed corpora
         run: go test -run 'Fuzz' ./...
 
+      # Bound the smoke run by execution count, not wall-clock time. A duration
+      # -fuzztime arms a deadline-based context in the fuzzing coordinator; on a
+      # loaded shared runner a worker can miss that deadline and the run fails
+      # with "context deadline exceeded" even when no input actually crashed.
+      # A count bound removes the deadline entirely and keeps the run
+      # deterministic. The real time-bounded campaign lives in fuzz-nightly.yml.
       - name: Short fuzz run (root)
         run: |
           for fz in FuzzMessageJSONRoundTrip FuzzValidateRecurrence FuzzComputeNextSchedule FuzzDecodeRecurrence FuzzMongoCodecRoundTrip FuzzHandleDeliveryFailure; do
-            go test -run '^$' -fuzz "^$fz\$" -fuzztime=15s .
+            go test -run '^$' -fuzz "^$fz\$" -fuzztime=20000x .
           done
 
       - name: Short fuzz run (service)
         run: |
           for fz in FuzzMessageToProto FuzzProtoToFilter; do
-            go test -run '^$' -fuzz "^$fz\$" -fuzztime=15s ./service
+            go test -run '^$' -fuzz "^$fz\$" -fuzztime=20000x ./service
           done
 
   bench:
